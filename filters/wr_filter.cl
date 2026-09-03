@@ -112,18 +112,35 @@ item wr_shop_joker(instance* inst, int ante) {
     return next_joker(inst, S_Shop, ante);
 }
 
-long filter(instance* inst) {
+// Gate 1: the first shop pack must contain The Soul and it must award Perkeo.
+// About 0.07% of seeds pass. Shared by prefilter() and filter().
+bool wr_gate1(instance* inst) {
     next_pack(inst, 1); // The first shop pack is always a Buffoon Pack in this setup.
-
-    // First shop pack must contain The Soul and it must award Perkeo.
     pack firstPack = pack_info(next_pack(inst, 1));
     if (firstPack.type != Arcana_Pack && firstPack.type != Spectral_Pack) {
-        return 0;
+        return false;
     }
     if (!wr_pack_has_soul(inst, firstPack, 1)) {
-        return 0;
+        return false;
     }
-    if (next_joker(inst, S_Soul, 1) != Perkeo) {
+    return next_joker(inst, S_Soul, 1) == Perkeo;
+}
+
+// Two-pass search (see search.cl). Pass 1 runs only this on every seed; pass 2
+// runs filter() from scratch on the seeds that passed, packed together. This
+// filter's cost varies ~100x between a gate-1 reject and a full ante-38 run,
+// so in a single pass most lanes in a warp sit idle waiting for the one deep
+// seed; splitting removes that. Only gate 1 is here: adding gate 2 would cut
+// pass-2 volume another 1000x but make pass 1 itself divergent (0.07% of
+// lanes running 14 shop items + 9 packs while the rest wait), and pass 2 is
+// already a tiny fraction of the total.
+#define HAS_PREFILTER
+bool prefilter(instance* inst) {
+    return wr_gate1(inst);
+}
+
+long filter(instance* inst) {
+    if (!wr_gate1(inst)) {
         return 0;
     }
 

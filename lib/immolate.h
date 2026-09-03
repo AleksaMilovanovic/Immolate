@@ -87,6 +87,18 @@ cl_ulong fnv1a_device_info(cl_ulong h, cl_device_id device, cl_device_info param
     clGetDeviceInfo(device, param, sizeof(buf), buf, NULL);
     return fnv1a_str(h, buf);
 }
+// Rank of a seed string in the bijective base-35 order the kernel walks:
+// "" = 0, "1".."Z" = 1..35, "11" = 36, ... "ZZZZZZZZ" = 2318107019760.
+cl_long seed_rank(const cl_char8* s) {
+    static const char chars[] = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    cl_long rank = 0;
+    for (int i = 0; i < 8 && s->s[i] != '\0'; i++) {
+        const char* p = strchr(chars, s->s[i]);
+        int digit = p ? (int)(p - chars) : 0;
+        rank = rank * 35 + digit + 1;
+    }
+    return rank;
+}
 void make_dir(const char* path) {
     #ifdef _WIN32
         _mkdir(path);

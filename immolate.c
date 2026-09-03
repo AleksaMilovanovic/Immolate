@@ -11,6 +11,9 @@ int main(int argc, char **argv) {
     unsigned int numGroups = 0; // 0 = derive from the device's compute unit count
     int noCache = 0;
     int verboseBuild = 0;
+    int singlePass = 0;
+    cl_long prefilterBatch = 1 << 26; // 67M seeds per pass-1 batch: 512 MB survivor buffer worst case
+    int progressEvery = 0;
     cl_char8 startingSeed;
     for (int i = 0; i < 8; i++) {
         startingSeed.s[i] = '\0';
@@ -20,7 +23,7 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.");
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per prefilter batch in a two-pass search. Defaults to 67108864.\n--progress <P>   In a two-pass search, print progress to stderr every P batches. Defaults to off.");
             return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
@@ -68,6 +71,19 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i],  "--no_cache")==0) {
             noCache = 1;
+        }
+        if (strcmp(argv[i],  "--single_pass")==0) {
+            // Ignore the filter's prefilter and run the plain single-pass kernel.
+            singlePass = 1;
+        }
+        if (strcmp(argv[i],  "--batch")==0) {
+            prefilterBatch = strtoll(argv[i+1], NULL, 10);
+            if (prefilterBatch < 1) prefilterBatch = 1;
+            i++;
+        }
+        if (strcmp(argv[i],  "--progress")==0) {
+            progressEvery = atoi(argv[i+1]);
+            i++;
         }
         if (strcmp(argv[i],  "--verbose_build")==0) {
             // Print the compiler's build log even on success. On NVIDIA this
@@ -361,9 +377,19 @@ build_program:
     }
     clErrCheck(err, "clCreateKernel - Creating OpenCL kernel");
 
-    // Set arguments
-    err = clSetKernelArg(ssKernel, 0, sizeof(startingSeed), &startingSeed);
-    clErrCheck(err, "clSetKernelArg - Adding starting seed argument");
+    // Filters that define HAS_PREFILTER also get search_prefilter/search_ranks
+    // and run as two passes (see search.cl). Absence of those kernels is the
+    // normal single-pass case, not an error.
+    cl_int errPre = CL_SUCCESS, errRanks = CL_SUCCESS;
+    cl_kernel preKernel = clCreateKernel(ssKernelProgram, "search_prefilter", &errPre);
+    cl_kernel ranksKernel = clCreateKernel(ssKernelProgram, "search_ranks", &errRanks);
+    int twoPass = (errPre == CL_SUCCESS && errRanks == CL_SUCCESS && !singlePass);
+    if (errPre != CL_SUCCESS) preKernel = NULL;
+    if (errRanks != CL_SUCCESS) ranksKernel = NULL;
+
+    cl_long startRank = seed_rank(&startingSeed);
+    err = clSetKernelArg(ssKernel, 0, sizeof(startRank), &startRank);
+    clErrCheck(err, "clSetKernelArg - Adding starting rank argument");
     err = clSetKernelArg(ssKernel, 1, sizeof(numSeeds), &numSeeds);
     clErrCheck(err, "clSetKernelArg - Adding number of seeds argument");
     err = clSetKernelArg(ssKernel, 2, sizeof(cutoff), &cutoff);
@@ -398,19 +424,94 @@ build_program:
     // Execute OpenCL kernel
     printf_s("Starting searcher...\n");
     clock_t begin = clock();
-    err = clEnqueueNDRangeKernel(queue, ssKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
-    if (err == CL_INVALID_WORK_GROUP_SIZE && localSize > 1) {
-        // The driver rejected the group size for this kernel. Halve it and retry.
-        printf_s("Work-group size %zu rejected by the driver, retrying with %zu.\n", localSize, localSize / 2);
-        localSize /= 2;
-        globalSize = (size_t)numGroups * localSize;
+    if (!twoPass) {
         err = clEnqueueNDRangeKernel(queue, ssKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
+        if (err == CL_INVALID_WORK_GROUP_SIZE && localSize > 1) {
+            // The driver rejected the group size for this kernel. Halve it and retry.
+            printf_s("Work-group size %zu rejected by the driver, retrying with %zu.\n", localSize, localSize / 2);
+            localSize /= 2;
+            globalSize = (size_t)numGroups * localSize;
+            err = clEnqueueNDRangeKernel(queue, ssKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
+        }
+        clErrCheck(err, "clEnqueueNDRangeKernel - Executing OpenCL kernel");
+        err = clFlush(queue);
+        err = clFinish(queue);
+    } else {
+        // Two-pass search. Pass 1 runs the prefilter over a batch of seeds and
+        // appends survivors' ranks to a device buffer; pass 2 runs the full
+        // filter on that packed list. The survivor buffer is sized to hold every
+        // seed of a batch, so the kernel can never overflow it regardless of the
+        // prefilter's pass rate; the batch size is what bounds the memory.
+        const cl_long batchSeeds = prefilterBatch;
+        cl_mem survivorsBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_long) * (size_t)batchSeeds, NULL, &err);
+        clErrCheck(err, "clCreateBuffer - Creating survivor buffer");
+        cl_mem countBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), NULL, &err);
+        clErrCheck(err, "clCreateBuffer - Creating survivor count buffer");
+        err = clSetKernelArg(preKernel, 2, sizeof(cl_mem), &survivorsBuf);
+        clErrCheck(err, "clSetKernelArg - Adding survivor buffer argument");
+        err = clSetKernelArg(preKernel, 3, sizeof(cl_mem), &countBuf);
+        clErrCheck(err, "clSetKernelArg - Adding survivor count argument");
+        err = clSetKernelArg(ranksKernel, 0, sizeof(cl_mem), &survivorsBuf);
+        clErrCheck(err, "clSetKernelArg - Adding ranks buffer argument");
+        err = clSetKernelArg(ranksKernel, 2, sizeof(cutoff), &cutoff);
+        clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
+        printf_s("Two-pass search: prefilter in batches of %lld seeds.\n", (long long)batchSeeds);
+
+        cl_long totalSurvivors = 0;
+        int batches = 0;
+        for (cl_long done = 0; done < numSeeds; done += batchSeeds) {
+            cl_long thisBatch = numSeeds - done < batchSeeds ? numSeeds - done : batchSeeds;
+            cl_long batchStart = startRank + done;
+            cl_uint zero = 0;
+            err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
+            clErrCheck(err, "clEnqueueWriteBuffer - Resetting survivor count");
+            err = clSetKernelArg(preKernel, 0, sizeof(batchStart), &batchStart);
+            clErrCheck(err, "clSetKernelArg - Adding batch start rank");
+            err = clSetKernelArg(preKernel, 1, sizeof(thisBatch), &thisBatch);
+            clErrCheck(err, "clSetKernelArg - Adding batch size");
+            err = clEnqueueNDRangeKernel(queue, preKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
+            if (err == CL_INVALID_WORK_GROUP_SIZE && localSize > 1) {
+                printf_s("Work-group size %zu rejected by the driver, retrying with %zu.\n", localSize, localSize / 2);
+                localSize /= 2;
+                globalSize = (size_t)numGroups * localSize;
+                err = clEnqueueNDRangeKernel(queue, preKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
+            }
+            clErrCheck(err, "clEnqueueNDRangeKernel - Executing prefilter kernel");
+
+            cl_uint survivors = 0;
+            err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(survivors), &survivors, 0, NULL, NULL);
+            clErrCheck(err, "clEnqueueReadBuffer - Reading survivor count");
+            totalSurvivors += survivors;
+            batches++;
+
+            if (survivors > 0) {
+                cl_long numRanks = survivors;
+                err = clSetKernelArg(ranksKernel, 1, sizeof(numRanks), &numRanks);
+                clErrCheck(err, "clSetKernelArg - Adding number of ranks");
+                // Survivors are few; do not launch more lanes than there is work.
+                size_t ranksGroups = ((size_t)survivors + localSize - 1) / localSize;
+                if (ranksGroups > (size_t)numGroups) ranksGroups = numGroups;
+                size_t ranksGlobal = ranksGroups * localSize;
+                err = clEnqueueNDRangeKernel(queue, ranksKernel, 1, NULL, &ranksGlobal, &localSize, 0, NULL, NULL);
+                clErrCheck(err, "clEnqueueNDRangeKernel - Executing ranks kernel");
+                err = clFinish(queue);
+                clErrCheck(err, "clFinish - Waiting for ranks kernel");
+            }
+            if (progressEvery > 0 && batches % progressEvery == 0) {
+                double elapsed = (double)(clock() - begin) / CLOCKS_PER_SEC;
+                fprintf(stderr, "[%lld / %lld seeds, %lld survivors, %.1fs]\n",
+                        (long long)(done + thisBatch), (long long)numSeeds, (long long)totalSurvivors, elapsed);
+            }
+        }
+        err = clFinish(queue);
+        printf_s("Prefilter passed %lld of %lld seeds.\n", (long long)totalSurvivors, (long long)numSeeds);
+        clReleaseMemObject(survivorsBuf);
+        clReleaseMemObject(countBuf);
     }
-    clErrCheck(err, "clEnqueueNDRangeKernel - Executing OpenCL kernel");
 
     // Clean up
-    err = clFlush(queue);
-    err = clFinish(queue);
+    if (preKernel) clReleaseKernel(preKernel);
+    if (ranksKernel) clReleaseKernel(ranksKernel);
     err = clReleaseKernel(ssKernel);
     err = clReleaseProgram(ssKernelProgram);
     err = clReleaseCommandQueue(queue);
