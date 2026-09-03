@@ -493,10 +493,37 @@ plateau; re-run the -g scaling sweep to find the new saturation point. The
 node lookup also got cheaper (one 64-bit compare per node instead of a nested
 loop), which matters most for cache-heavy filters.
 
+### Incidental finding: pseudohash shifts by 32 on a 32-bit int (lib/util.cl:46)
+
+    int k = 32;
+    ... * (1<<k) ...   // three times, lines 46-48
+
+`1 << 32` where 1 is a 32-bit int is undefined behaviour. UBSan reports it on
+unmodified HEAD ("shift exponent 32 is too large for 32-bit type 'int'").
+It is not latent: the host C build of the kernel finishes 5 seeds in 0.01s at
+-O0 but HANGS at -O1, because the folded value differs, `num` degenerates,
+and the resample loop in randchoice_common never finds an unlocked item.
+
+This is pre-existing and orthogonal to the struct shrink — the same single
+UBSan report appears before and after these changes, and no new one appears.
+It has not been biting on the GPU because NVIDIA's front end happens to fold
+it the way -O0 does, but it is exactly the kind of thing that changes with a
+driver update or a different optimization level, and it would silently alter
+every hash (and therefore every search result) if it did.
+
+The intended value is 2^32. `(double)4294967296.0` or `1UL << 32` would both
+be well-defined, but which one reproduces today's GPU results has to be
+established by the golden diff before changing it — the whole point of the
+constant is bit-exactness with Balatro. Recommend fixing it deliberately with
+its own golden run rather than leaving UB in the hot path.
+
 ### Added to Deferred
-9. Fix s_skip's negative-digit path (short start seed + large stride prints
-   truncated seed strings today). Changes output, so it needs its own golden
-   run; doing it first would unblock the uchar8 seed storage above.
+9. [DONE, see "s_skip correctness fix" above] Fix s_skip's negative-digit
+   path. The uchar8 seed storage (72 bytes/lane) is now viable but, given
+   the struct shrink produced no measurable gain, not worth doing.
+10. Replace the UB `1<<32` in pseudohash (lib/util.cl:46-48) with a
+    well-defined 2^32. Must be validated bit-exact against the current GPU
+    output first; see the finding above.
 
 --------------------------------------------------------------------------------
 ## Changes applied (2026-09-03) — s_skip correctness fix and filter deletions
@@ -665,3 +692,11 @@ residual step to be correctly rounded; re-ran 3e8 random and 3e8 adversarial
 (rounding-boundary) divisors with perturbed seeds, zero mismatches; confirmed
 num == 0 gives +inf on both old and new paths; confirmed the host passes no
 fast-math or mad-enable build options. Two comment inaccuracies fixed.
+
+Follow-up on item 10: on the host, scale 1 and scale 2^32 give the same
+hashedSeed for "11111111" (0.78390534373289711), but that is one sample and
+the recurrence is chaotic, so it proves nothing in general. filters/
+probe_hash.cl was added as a diagnostic: it prints the device compiler's
+value of `1 << 32` and hashedSeed("11111111"). Once the GPU value is known
+the shift can be replaced by that literal, which is output-identical on
+NVIDIA by construction and removes the undefined behaviour.
