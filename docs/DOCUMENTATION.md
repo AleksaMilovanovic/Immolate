@@ -811,7 +811,7 @@ Macros can be added to the top of a filter file to further customize its setting
 
 `#define FIXED_FILTER_CUTOFF`
 
-Instead of only printing out seeds generated with the highest score, running this filter will print out any seeds higher than the number specified with `-c`.
+No longer needed and has no effect. Immolate now always prints every seed whose score is at least the number specified with `-c`, instead of raising the cutoff to the best score seen so far during the run.
 
 ### Custom Game Versions
 ```cl

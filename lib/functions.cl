@@ -603,11 +603,25 @@ void sort_deck(item array[], int arrayLength) {
 }
 
 void init_erratic_deck(instance* inst) {
+    // Draw the 52 cards (RNG call order must stay exactly as the game does it),
+    // counting each card as it is drawn. Every value is one of the 52
+    // contiguous enum values C_2..S_T, so a counting sort produces the same
+    // sorted array as the old 52-element bubble sort (1,326 divergent
+    // compares) with 104 non-divergent steps.
+    int counts[52];
     for (int i = 0; i < 52; i++) {
-        inst->params.deckCards[i] = randchoice_simple(inst, R_Erratic, CARDS);
+        counts[i] = 0;
     }
-
-    sort_deck(inst->params.deckCards, inst->params.deckSize);
+    for (int i = 0; i < 52; i++) {
+        item c = randchoice_simple(inst, R_Erratic, CARDS);
+        counts[c - C_2]++;
+    }
+    int pos = 0;
+    for (int v = 0; v < 52; v++) {
+        for (int n = 0; n < counts[v]; n++) {
+            inst->params.deckCards[pos++] = (item)(C_2 + v);
+        }
+    }
 }
 #ifdef __NV_CL_C_VERSION
 void copy_cards(__generic item to[], __constant item from[]) {

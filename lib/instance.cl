@@ -21,21 +21,36 @@ typedef struct GameInstance {
     instance_params params;
 } instance;
 instance i_new(seed s) {
-    instance inst = {.locked = {true}};
+    // Deliberately no aggregate initializer: `instance inst = {...}` zero-fills
+    // the entire ~4 KB struct every seed, most of which is the RNG node cache.
+    // Cache nodes are only ever read at indices below nextFreeNode and are
+    // fully written by init_node/get_node_child first, so they need no init.
+    instance inst;
     inst.seed = s;
-    inst.hashedSeed = pseudohash(s_to_string(&s));
+    text seed_str = s_to_string(&s);
+    inst.hashedSeed = pseudohash(&seed_str);
     inst.rngCache.generatedFirstPack = false;
     inst.rngCache.nextFreeNode = 0;
-    instance_params params = {
-        .deck = Red_Deck, 
-        .stake = White_Stake,
-        .showman = false,
-        .vouchers = {false},
-        .deckCards = {RETRY},
-        .deckSize = 52,
-        .handSize = 8
-    };
-    inst.params = params;
+    // rng is only consumed after a seeded call, but keep the old zeroed state
+    // for any filter that reads it first.
+    inst.rng.state = (ulong4)(0, 0, 0, 0);
+    inst.rng.out.ul = 0;
+    // Old initializer was {.locked = {true}}: only locked[0] (RETRY) is true.
+    for (int i = 0; i < ITEMS_END; i++) {
+        inst.locked[i] = false;
+    }
+    inst.locked[RETRY] = true;
+    inst.params.deck = Red_Deck;
+    inst.params.stake = White_Stake;
+    inst.params.showman = false;
+    for (int i = 0; i < 32; i++) {
+        inst.params.vouchers[i] = false;
+    }
+    for (int i = 0; i < 52; i++) {
+        inst.params.deckCards[i] = RETRY;
+    }
+    inst.params.deckSize = 52;
+    inst.params.handSize = 8;
     return inst;
 }
 double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
@@ -64,10 +79,12 @@ double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
         node_id = init_node(&(inst->rngCache),nts,ids,num);
         text phvalue = node_str(nts[0],ids[0]);
         for (int i = 1; i < num; i++) {
-            phvalue = text_concat(phvalue, node_str(nts[i],ids[i]));
+            text part = node_str(nts[i],ids[i]);
+            text_append(&phvalue, &part);
         }
-        phvalue = text_concat(phvalue,s_to_string(&inst->seed));
-        inst->rngCache.nodes[node_id].rngState = pseudohash(phvalue);
+        text seed_str = s_to_string(&inst->seed);
+        text_append(&phvalue, &seed_str);
+        inst->rngCache.nodes[node_id].rngState = pseudohash(&phvalue);
     }
     inst->rngCache.nodes[node_id].rngState = roundDigits(fract(inst->rngCache.nodes[node_id].rngState*1.72431234+2.134453429141),13);
     return (inst->rngCache.nodes[node_id].rngState + inst->hashedSeed)/2;

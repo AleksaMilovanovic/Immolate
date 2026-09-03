@@ -18,13 +18,13 @@ inline void set_text_length(text* t, int len) {
     t->str[t->len] = '\0';
 }
 
-text text_concat(text a, text b) {
-    text temp = a;
-    for (int j = 0; j < b.len; j++) {
-        temp.str[a.len+j] = b.str[j];
+// Appends b onto a in place. Replaces the old by-value text_concat, which
+// copied two 260-byte structs in and one out per call.
+void text_append(text* a, const text* b) {
+    for (int j = 0; j < b->len; j++) {
+        a->str[a->len+j] = b->str[j];
     }
-    set_text_length(&temp, temp.len+b.len);
-    return temp;
+    set_text_length(a, a->len+b->len);
 }
 
 void print_text(text x) {
@@ -38,13 +38,13 @@ double fract(double f) {
     return f-floor(f);
 }
 
-double pseudohash(text s) {
+double pseudohash(const text* s) {
     double num = 1;
     int k = 32; //determines size of left and right shifts...
-    for (int i = s.len - 1; i >= 0; i--) {
+    for (int i = s->len - 1; i >= 0; i--) {
         // Floating point addition is weird, so we have to make it have more room for error
-        long int_part = (1.1239285023/num*s.str[i]*3.141592653589793116+3.141592653589793116*(i+1))*(1<<k);
-        double fract_part = fract(fract((1.1239285023/num*s.str[i]*3.141592653589793116)*(1<<k))+fract((3.141592653589793116*(i+1))*(1<<k)));
+        long int_part = (1.1239285023/num*s->str[i]*3.141592653589793116+3.141592653589793116*(i+1))*(1<<k);
+        double fract_part = fract(fract((1.1239285023/num*s->str[i]*3.141592653589793116)*(1<<k))+fract((3.141592653589793116*(i+1))*(1<<k)));
         num = fract(((double)(int_part)+fract_part)/(1<<k));
         // What the original function would look like:
         //num = fract(1.1239285023/num*s.str[i]*3.141592653589793116+3.141592653589793116*(i+1));
@@ -72,7 +72,11 @@ unsigned int rsh32(unsigned int x, size_t r) {
     return x>>r;
 }
 double roundDigits(double f, int d) {
-    double power = pow((double)10, d);
+    // Every caller passes d = 13. 10^13 is exactly representable, so the
+    // literal is what a correct pow() returns; avoiding the call guarantees
+    // no per-draw double-precision pow on the hot path. The divide is kept
+    // because multiplying by 1e-13 is not bit-exact.
+    double power = (d == 13) ? 1e13 : pow((double)10, d);
     return round(f*power)/power;
 }
 

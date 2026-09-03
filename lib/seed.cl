@@ -1,6 +1,6 @@
 // Some important definitions
 __constant char SEEDCHARS[] = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-__constant int NUM_CHARS = 35;
+#define NUM_CHARS 35
 
 int s_char_num(char c){
     return c - (49 + (c>57)*7);

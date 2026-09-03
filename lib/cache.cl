@@ -156,7 +156,8 @@ text resample_str(int x) {
     } else {
         text str1 = init_text("_resample", 9);
         text str2 = int_to_str(x+1);
-        return text_concat(str1, str2);
+        text_append(&str1, &str2);
+        return str1;
     }
 }
 
