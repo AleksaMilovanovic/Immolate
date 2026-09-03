@@ -58,9 +58,17 @@ inline double div_pos(double a, double b) {
     return fma(rr, y2, q);
 }
 
+// PH_SCALE replaces the original `(1<<k)` with k = 32. Shifting a 32-bit int
+// by 32 is undefined in C and OpenCL C; NVIDIA's compiler folds it to 1
+// (confirmed on an RTX 5080 via a probe kernel: 1<<32 == 1 and
+// hashedSeed("11111111") == 0.78390534373289711, matching the host at scale 1).
+// Every result this searcher has ever produced used that value, so it is
+// pinned here as a literal. The int_part/fract_part structure is kept exactly
+// because at scale 1 it is NOT equivalent to the plain one-line recurrence
+// (the long truncation changes results); only the shift expression changed.
+#define PH_SCALE 1
 double pseudohash(const text* s) {
     double num = 1;
-    int k = 32; //determines size of left and right shifts...
     for (int i = s->len - 1; i >= 0; i--) {
         // num starts at 1 and every later value is a fract() output in [0, 1).
         // An exact 0 takes div_pos's fallback and yields +inf, same as before.
@@ -68,9 +76,9 @@ double pseudohash(const text* s) {
         // expensive instruction in the hash. Same value, no divide.
         double q = div_pos(1.1239285023, num);
         // Floating point addition is weird, so we have to make it have more room for error
-        long int_part = (q*s->str[i]*3.141592653589793116+3.141592653589793116*(i+1))*(1<<k);
-        double fract_part = fract(fract((q*s->str[i]*3.141592653589793116)*(1<<k))+fract((3.141592653589793116*(i+1))*(1<<k)));
-        num = fract(((double)(int_part)+fract_part)/(1<<k));
+        long int_part = (q*s->str[i]*3.141592653589793116+3.141592653589793116*(i+1))*PH_SCALE;
+        double fract_part = fract(fract((q*s->str[i]*3.141592653589793116)*PH_SCALE)+fract((3.141592653589793116*(i+1))*PH_SCALE));
+        num = fract(((double)(int_part)+fract_part)/PH_SCALE);
         // What the original function would look like:
         //num = fract(1.1239285023/num*s.str[i]*3.141592653589793116+3.141592653589793116*(i+1));
     }
@@ -80,11 +88,10 @@ double pseudohash(const text* s) {
 double pseudohash8(char8 s) {
     //resizeString(&s, 16, ' ');
     double num = 1;
-    int k = 32;
     for (int i = 7; i >= 0; i--) {
-        long int_part = (1.1239285023/num*s[i]*3.141592653589793116+3.141592653589793116*(i+1))*(1<<k);
-        double fract_part = fract(fract((1.1239285023/num*s[i]*3.141592653589793116)*(1<<k))+fract((3.141592653589793116*(i+1))*(1<<k)));
-        num = fract(((double)(int_part)+fract_part)/(1<<k));
+        long int_part = (1.1239285023/num*s[i]*3.141592653589793116+3.141592653589793116*(i+1))*PH_SCALE;
+        double fract_part = fract(fract((1.1239285023/num*s[i]*3.141592653589793116)*PH_SCALE)+fract((3.141592653589793116*(i+1))*PH_SCALE));
+        num = fract(((double)(int_part)+fract_part)/PH_SCALE);
     }
     return num;
 }
