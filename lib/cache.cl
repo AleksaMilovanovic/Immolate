@@ -161,20 +161,37 @@ text resample_str(int x) {
     }
 }
 
+#ifndef CACHE_SIZE
+#define CACHE_SIZE 64
+#endif
+
+// A cache node is identified by up to 4 (nodeType, nodeValue) pairs packed into
+// a single 64-bit key: 16 bits per slot, slot k at bits 16k..16k+15, holding
+// ((nodeType & 3) << 14) | (nodeValue & 0x3FFF). Slots past the node's depth are
+// 0xFFFF, which no real slot can produce because every nodeValue in use is well
+// below 0x3FFF (rtype < 40, rsrc < 24, antes are small, resample counters are
+// small), so the key encodes the depth as well as the contents.
+#define NODE_SLOT_EMPTY 0xFFFFUL
+inline ulong node_key(ntype nts[], int ids[], int num) {
+    ulong key = 0;
+    for (int i = 0; i < 4; i++) {
+        ulong slot = (i < num)
+            ? ((((ulong)nts[i] & 3UL) << 14) | ((ulong)ids[i] & 0x3FFFUL))
+            : NODE_SLOT_EMPTY;
+        key |= slot << (16 * i);
+    }
+    return key;
+}
+
 typedef struct RNGInfo {
-    ntype nodeTypes[4];
-    int nodeValues[4];
-    int depth;
+    ulong key;
     double rngState;
 } rnginfo;
 
 typedef struct Cache {
-    #ifdef CACHE_SIZE
     rnginfo nodes[CACHE_SIZE];
-    #else
-    rnginfo nodes[64];
-    #endif
     bool generatedFirstPack;
+    bool reportedOverflow;
     int nextFreeNode;
 } cache;
 
@@ -186,12 +203,19 @@ text node_str(ntype nt, int x) {
         case N_Resample: return resample_str(x);
     }
 }
-int init_node(cache* c, ntype nodeTypes[], int nodeValues[], int depth) {
-    for (int i = 0; i < depth; i++) {
-        c->nodes[c->nextFreeNode].nodeTypes[i] = nodeTypes[i];
-        c->nodes[c->nextFreeNode].nodeValues[i] = nodeValues[i];
+int init_node(cache* c, ulong key) {
+    if (c->nextFreeNode >= CACHE_SIZE) {
+        // Previously this wrote past nodes[] silently. Warn once per work-item
+        // and reuse the last slot instead; results for this seed will be wrong,
+        // but nothing is corrupted.
+        if (!c->reportedOverflow) {
+            c->reportedOverflow = true;
+            printf("Immolate: RNG node cache overflow, CACHE_SIZE=%d is too small for this filter\n", CACHE_SIZE);
+        }
+        c->nodes[CACHE_SIZE-1].key = key;
+        return CACHE_SIZE-1;
     }
-    c->nodes[c->nextFreeNode].depth = depth;
+    c->nodes[c->nextFreeNode].key = key;
     c->nextFreeNode++;
     return c->nextFreeNode-1;
 };

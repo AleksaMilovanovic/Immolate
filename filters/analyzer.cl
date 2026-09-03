@@ -47,22 +47,22 @@ long filter(instance* inst) {
     init_locks(inst, 1, false, true);
 
     // For simplicity, we'll assume every voucher is redeemed (but they all start out locked)
-    inst->locked[Overstock_Plus] = true;
-    inst->locked[Liquidation] = true;
-    inst->locked[Glow_Up] = true;
-    inst->locked[Reroll_Glut] = true;
-    inst->locked[Omen_Globe] = true;
-    inst->locked[Observatory] = true;
-    inst->locked[Nacho_Tong] = true;
-    inst->locked[Recyclomancy] = true;
-    inst->locked[Tarot_Tycoon] = true;
-    inst->locked[Planet_Tycoon] = true;
-    inst->locked[Money_Tree] = true;
-    inst->locked[Antimatter] = true;
-    inst->locked[Illusion] = true;
-    inst->locked[Petroglyph] = true;
-    inst->locked[Retcon] = true;
-    inst->locked[Palette] = true;
+    i_lock(inst, Overstock_Plus);
+    i_lock(inst, Liquidation);
+    i_lock(inst, Glow_Up);
+    i_lock(inst, Reroll_Glut);
+    i_lock(inst, Omen_Globe);
+    i_lock(inst, Observatory);
+    i_lock(inst, Nacho_Tong);
+    i_lock(inst, Recyclomancy);
+    i_lock(inst, Tarot_Tycoon);
+    i_lock(inst, Planet_Tycoon);
+    i_lock(inst, Money_Tree);
+    i_lock(inst, Antimatter);
+    i_lock(inst, Illusion);
+    i_lock(inst, Petroglyph);
+    i_lock(inst, Retcon);
+    i_lock(inst, Palette);
 
     bool ghostDeck = inst->params.deck == Ghost_Deck;
     for (int ante = 1; ante <= maxAnte; ante++) {

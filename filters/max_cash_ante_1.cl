@@ -16,7 +16,7 @@ long filter(instance* inst) {
     for (int i = 0; i < 5; i++) {
         if (tarots[i] == The_Hermit) hasHermit = 1;
         else if (tarots[i] == The_Emperor) hasEmperor = 1;
-        else inst->locked[tarots[i]] = true; // Locked for emperor generation
+        else i_lock(inst, tarots[i]); // Locked for emperor generation
     }
     if (hasHermit + hasEmperor != 2) return passedFilters;
     passedFilters++;

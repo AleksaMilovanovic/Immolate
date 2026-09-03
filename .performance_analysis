@@ -354,3 +354,145 @@ Expected effect
 Validate on Windows with the golden-output procedure above. Because the
 default cutoff of 1 prints a large fraction of seeds on erratic_flush_five,
 use -c 3 or higher for the comparison so output volume does not dominate.
+
+--------------------------------------------------------------------------------
+## Changes applied (2026-09-03) — struct shrink
+--------------------------------------------------------------------------------
+Goal was item 2's deferred work: cut per-lane state so more work-groups stay
+resident per SM (throughput plateaued at 512 resident threads/SM of 1,536).
+
+Measured instance size (host C build of the kernel, arm64, 1-byte bool):
+3984 -> 1504 bytes, a 62% reduction. NVIDIA's 4-byte bool makes the old
+number 5552, so the relative win there is larger.
+
+    member            before   after
+    seed                  80      80   (unchanged, see "not applied" below)
+    cache rngCache      3080    1032
+    hashedSeed             8       8
+    lrandom rng           48      48
+    locked[]             494      64   (was bool[494], now ulong[8])
+    params               260     260
+    total               3984    1504
+
+### 1. locked[] is a bitset (lib/instance.cl)
+`bool locked[ITEMS_END]` became `ulong locked[LOCKED_WORDS]` where
+LOCKED_WORDS = (ITEMS_END + 63) / 64 = 8, with three inline accessors
+declared right after the struct: i_locked / i_lock / i_unlock. 190 call
+sites were converted mechanically (173 writes, 17 reads):
+
+    lib/instance.cl            140   (mostly init_locks / init_unlocks)
+    lib/functions.cl            30
+    filters/analyzer.cl         16
+    filters/purchaseless.cl      3
+    filters/max_cash_ante_1.cl   1
+
+i_new now zeroes the 8 words and calls i_lock(inst, RETRY), matching the old
+`{.locked = {true}}` semantics exactly (only locked[0] set). No
+`inst->locked[...]` site remains outside the accessors themselves.
+docs/DOCUMENTATION.md describes a lock/unlock/isLocked API without naming the
+struct field, so it needed no change.
+
+### 2. Compact RNG cache node (lib/cache.cl, lib/instance.cl)
+`rnginfo` was `{ntype nodeTypes[4]; int nodeValues[4]; int depth; double
+rngState;}` (48 bytes) and is now `{ulong key; double rngState;}` (16 bytes),
+so the 64-node cache drops from 3080 to 1032 bytes.
+
+The key packs the (type, value) pairs and the depth into one word: 16 bits
+per slot, slot k at bits 16k..16k+15, holding ((nodeType & 3) << 14) |
+(nodeValue & 0x3FFF). Slots at or past the node's depth are 0xFFFF, which no
+real slot can produce because every nodeValue in use is far below 0x3FFF
+(rtype < 40, rsrc < 24, antes run 1..8, resample counters are small) — so the
+key is injective over the values this kernel actually generates and encodes
+the depth implicitly. get_node_child builds the key once and the lookup loop
+is now a single 64-bit compare per cached node instead of a nested loop over
+up to 4 type/value pairs. init_node stores the key. The string fed to
+pseudohash is built exactly as before; only the lookup key changed.
+
+Overflow guard: init_node previously wrote past nodes[] once nextFreeNode
+reached CACHE_SIZE, silently. It now prints one line naming CACHE_SIZE (gated
+by a new `reportedOverflow` bool in the cache struct, initialized false in
+i_new, so it is at most one message per work-item) and reuses the last slot
+instead of writing out of bounds. Results for an overflowing seed are still
+wrong, but memory is no longer corrupted. Confirmed under AddressSanitizer:
+the old code reports a stack-buffer-overflow at CACHE_SIZE=8, the new code
+does not. CACHE_SIZE also became a normal `#ifndef`-guarded define (default
+64) rather than an #ifdef in the struct body; filters that set it (analyzer,
+perkeo_analyzer: 1000) are unaffected.
+
+### 3. Seed digits as bytes — NOT APPLIED (reverted)
+Changing `seed.data` from ulong8 to uchar8 changes search output and cannot
+be done as a pure storage change. s_skip relies on digits being able to hold
+-1:
+
+    sum += s->data[i * (i >= 0)] * (i >= 0) + -1 * (i < 0);
+    data[j] = sum % NUM_CHARS;
+
+When the skip distance has more base-35 digits than the current seed length,
+i goes negative, sum becomes -1, and C's truncating % stores -1 into the
+digit array. s_char_at then indexes SEEDCHARS[-1] and s_to_string emits the
+byte before the string literal — in practice a NUL, which truncates the
+printed seed. With ulong8 that -1 is stored as 0xFFFF...FF; with uchar8 it
+becomes 255, a different out-of-range index, so the two builds print
+different seed strings and, because the string is what pseudohash consumes,
+different scores.
+
+Verified by differential test: with an empty or 1-2 character starting seed
+and a stride of one launch's worth of work-items (43,008), the base and
+uchar8 builds diverge from the second seed onward. The default starting seed
+IS the empty seed, so this is on the normal path, not a corner case. Start
+seeds of 3+ characters were identical for every stride tested.
+
+This is a pre-existing bug in s_skip, not something the byte change
+introduced — the old build is already printing truncated seed strings for
+short start seeds — but fixing it changes output, so it is out of scope for
+a size reduction that must stay byte-identical. Left as a separate item; see
+"Deferred" below. Reverting it costs 72 of the targeted bytes (the struct is
+1504 rather than the ~1.2 KB target).
+
+### Validation performed on macOS
+- All 29 filters were checked two ways. Apple's OpenCL front end accepts all
+  29 (the prescribed check), but that check has no teeth: Apple defers
+  compilation, so a filter with deliberately invalid C still "passes" it.
+  A real front-end check is `clang -x cl -cl-std=CL1.2 -target
+  spir64-unknown-unknown -Xclang -finclude-default-header -I. -fsyntax-only`
+  on a file that includes the filter; that target has fp64 and does compile
+  the source. Under it 27 of 29 pass and two fail — longest_joker_name
+  (`no member named '_item' in 'struct ShopItem'`) and orbital_test (`too
+  many arguments` to next_joker). Both failures are present on unmodified
+  HEAD and are unrelated to these changes; the pass/fail set is identical
+  before and after.
+- Differential test against HEAD. The kernel compiles as host C with a small
+  shim (ext_vector_type for the OpenCL vector types, __constant -> const,
+  -fgnu89-inline). A driver hashes, per seed: the seed string, hashedSeed,
+  the 52-card erratic deck, and over antes 1..8 the voucher, voucher-from-tag,
+  boss, tag, pack, 6 shop items, and 4 each of tarot/planet/spectral/standard
+  card/joker-with-info, plus next_orbital_tag, the node count, and the full
+  494-bit locked state. Old and new builds produce byte-identical output for
+  600 consecutive seeds from the empty seed and for 25 seeds at each of the
+  offsets 34, 1224, 50000, 1500000, 987654321, 52521875 and 2318107019000
+  (the last two crossing base-35 digit boundaries). Seed stepping alone was
+  compared over 27 combinations (start lengths 0..8 x strides 1 / 43008 /
+  1000003) at 30,000 seeds each: all identical.
+  Caveat: this runs the kernel's arithmetic on an arm64 CPU, not on NVIDIA's
+  fp64 hardware. It proves the control flow, the RNG call order, the node
+  keys and the lock states are unchanged; it does not substitute for the
+  golden-output diff on the real device.
+
+Windows golden validation is still required before trusting results. Run the
+procedure in "How to validate any change" above on the RTX 5080 — a fixed
+-s / -n / -c on the old and new binaries, sorted and diffed — for at least
+erratic_flush_five and one shop-heavy filter (analyzer or perkeo_observatory,
+which exercise the RNG cache far harder). Nothing in this change set was
+executed on an NVIDIA GPU.
+
+Expected effect: per-lane state 3984 -> 1504 bytes should let noticeably more
+work-groups stay resident per SM. Whether that converts into throughput
+depends on whether occupancy was the binding constraint at the 141M seeds/s
+plateau; re-run the -g scaling sweep to find the new saturation point. The
+node lookup also got cheaper (one 64-bit compare per node instead of a nested
+loop), which matters most for cache-heavy filters.
+
+### Added to Deferred
+9. Fix s_skip's negative-digit path (short start seed + large stride prints
+   truncated seed strings today). Changes output, so it needs its own golden
+   run; doing it first would unblock the uchar8 seed storage above.
