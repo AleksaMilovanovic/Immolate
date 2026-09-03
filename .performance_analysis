@@ -1,0 +1,342 @@
+# Immolate performance analysis
+
+Date: 2026-09-02
+Method: static analysis of the host (immolate.c) and kernel (search.cl, lib/*.cl,
+filters/*.cl) by two independent read-only passes (one Claude Opus, one GPT-5.6),
+merged and re-ranked by the coordinator. Nothing was profiled on a GPU; every
+multiplier below is an estimate and is labelled as verified (read from the source)
+or inferred (general GPU codegen behaviour).
+
+Target machine reported by the user: Windows, RTX 5080 (84 SMs), 5090 available.
+Observations from the user: Task Manager "3D" graph reads 100% during a run;
+kernel build ("Building program...") takes roughly 5 minutes; a full sweep of the
+seed pool is impractically slow.
+
+Baseline costed against: filters/erratic_flush_five.cl. Per seed it does one
+i_new, 52 randchoice_simple(R_Erratic, CARDS) draws, one 52-element bubble sort,
+one 52-bin histogram, and one s_skip.
+
+Seed pool: 2,318,107,019,761 seeds (all base-35 strings of length 0..8). At
+100M seeds/s that is 6.4 hours. No single fix below makes a full sweep
+practical; items 1 through 4 together are what it takes.
+
+--------------------------------------------------------------------------------
+## Ranked bottlenecks (most critical first)
+--------------------------------------------------------------------------------
+
+### 1. Launch geometry starves the GPU  (immolate.c:266-267)
+
+    size_t globalSize = numGroups * numGroups;   // 16*16 = 256 work-items
+    size_t localSize  = numGroups;               // 16
+
+Verified. Default -g 16 launches 256 work-items in 16 work-groups of 16.
+
+Why it hurts:
+- A 5080 has 84 SMs and each SM holds on the order of 1,500 resident threads,
+  so the card can hold well over 100,000 work-items. 16 groups touch at most
+  16 SMs.
+- A work-group of 16 is half a warp (32 lanes). Every warp runs with half its
+  lanes permanently masked off.
+- globalSize and localSize are both derived from the single -g knob, so
+  raising the thread count also changes the group shape.
+
+Why "100% GPU" in Task Manager does not contradict this: that graph is the
+fraction of time the engine had any work queued. One half-warp per SM
+spinning forever reads as 100% while roughly 99% of the lanes are idle.
+
+The user's remark that "252 occupants (84 workers * 4)" is the ceiling is
+mistaken about the unit: work-items are threads, not SMs. Thousands of
+work-items per SM are normal.
+
+Cheap test: time -n 10000000 at -g 16, then -g 64, then -g 128. If throughput
+climbs with G, occupancy was the wall. (Under the old geometry -g 64 means
+4096 work-items in groups of 64.) If high -g values have ever hung, item 3 is
+why.
+
+Fix: decouple. localSize = the device's preferred work-group multiple (32 on
+NVIDIA, typically 64 on AMD), globalSize = groups * localSize with the group
+count derived from compute-unit count. Target 50k-200k work-items.
+Estimated gain: 50-300x on a discrete GPU, once items 2 and 3 are fixed.
+Nothing else on this list comes close.
+
+### 2. The per-seed instance struct is ~4-5.5 KB and is fully zeroed every seed
+###    (lib/instance.cl:15-40)
+
+Verified struct contents (bool size is implementation-defined in OpenCL C,
+hence the range):
+
+    member                              1-byte bool   4-byte bool
+    seed (ulong8 + int, 16-aligned)          80            80
+    cache rngCache (rnginfo nodes[64])     3080          3080
+    hashedSeed                                8             8
+    lrandom rng                              48            48
+    bool locked[ITEMS_END] (494 items)      494          1976
+    instance_params params                  260           356
+    total                                  3984          5552
+
+    instance inst = {.locked = {true}};     // instance.cl:24
+
+C99 designated-initializer semantics zero every member not named, so this
+emits roughly 4 KB of stores per seed. The 64-node RNG cache (77% of the
+struct) is pure waste: nextFreeNode = 0 already gates every node as
+invalid, and the erratic filter allocates exactly one node. params is then
+initialized a second time via a local struct and a copy (lines 29-38).
+
+Inferred: locked[], rngCache.nodes[] and params.deckCards[] are all indexed
+with runtime values, so the struct cannot be promoted to registers and lives
+in NVIDIA "local" (per-thread scratch) memory. Every RNG state touch is a
+memory op.
+
+This is both a direct per-seed cost (est. 1.3-2x) and the thing that makes
+item 1 affordable: 100k lanes x 5 KB is half a gigabyte of scratch traffic.
+
+Fixes, in order of payoff:
+- Initialize only the fields that are read before written. (Low risk.)
+- Make CACHE_SIZE a build-time define sized to the filter; erratic needs 1
+  node, a shop-heavy filter maybe 30. NOTE: too small a value silently
+  overflows nodes[] in init_node, so this is not a safe default change
+  without a bounds check. (Deferred.)
+- Pack locked[] as a bitset (ulong[8], 64 bytes). Touches every
+  inst->locked[x] site. (Deferred, mechanical but invasive.)
+
+### 3. The result path is undefined behaviour and will hang once item 1 is fixed
+###    (search.cl:7-14)
+
+    if (score >= filter_cutoff[0]) {
+        printf(...);
+        if (score > filter_cutoff[0]) {
+            filter_cutoff[0] = score;           // plain non-atomic store
+            barrier(CLK_GLOBAL_MEM_FENCE);      // inside a divergent branch
+        }
+    }
+
+Verified, three separate defects:
+a. barrier() must be reached by every work-item in the group along converged
+   control flow. Here it is two levels deep in a score-dependent branch. It
+   is harmless today only because localSize 16 is sub-warp, where the barrier
+   compiles to nothing. At 32 or more lanes some lanes skip it and the group
+   deadlocks.
+b. filter_cutoff[0] = score is a plain store racing every other lane's read.
+   Two lanes with different scores can clobber each other (lost update).
+c. filter_cutoff[0] is a non-volatile global read inside the loop; the
+   compiler may hoist it, so "cutoff rises over time" is not guaranteed.
+
+Also: kernel-side printf goes through a serialized device ring buffer. With
+the default cutoff of 1 on erratic_flush_five, every seed has a max card
+multiplicity of at least 1, so a large fraction of seeds print. Output may
+be truncated and it dominates timing on that filter with that cutoff.
+
+Fix chosen (user decision): drop the rising cutoff entirely. The -c value is
+passed as a plain kernel argument and every seed scoring at or above it is
+printed. No global write, no atomic, no barrier, no per-seed global read.
+Perf gain alone is modest; this is a correctness gate for item 1. Replacing
+printf with a compact result buffer drained by the host is the right
+long-term shape but changes output timing semantics. (Deferred.)
+
+### 4. The RNG pipeline is fp64-heavy on a card that runs fp64 at 1/64 rate
+
+Three pieces, all per RNG draw; erratic does 52 draws per seed.
+
+4a. randomseed runs LuaJIT's 10-round warmup before every draw
+    (lib/util.cl:154-175). Verified call chain: every random / randint /
+    randchoice with num > 0 calls randomseed(get_node_child(...)). Each draw
+    is therefore 11 Tausworthe steps of 64-bit shift/xor math, roughly
+    16,000 64-bit ALU ops per erratic seed; inferred ~40k scalar
+    instructions since consumer GPUs have no native 64-bit shifter.
+    This is semantically required: Balatro calls math.randomseed before each
+    math.random and the warmup is part of LuaJIT's randomseed. The steps are
+    GF(2)-linear over the state, so the 10 rounds can be collapsed into a
+    precomputed jump-ahead. Est. 3-5x on the RNG share. HIGH RISK: needs
+    bit-exact validation against a large seed corpus. (Deferred.)
+    Low-risk partial: _randint writes lr->state[i] back to scratch four
+    times per call; hoisting state into locals during randomseed removes
+    ~44 scratch stores per draw. (Deferred; compiler likely does it.)
+
+4b. roundDigits calls pow(10, 13) and does an fp64 divide on every draw
+    (lib/util.cl:74-77, called from instance.cl:72). The pow almost
+    certainly constant-folds after inlining but is not guaranteed to;
+    OpenCL's double pow is permitted up to 16 ulp error, so a literal 1e13
+    is at least as correct as the call. The divide does not fold. Replacing
+    the divide with a multiply by 1e-13 is NOT bit-exact and must be
+    validated before shipping. (Divide kept.)
+
+4c. pseudohash does one serially dependent fp64 divide per character
+    (lib/util.cl:41-53) and takes a 260-byte text by value; text_concat
+    copies two of them per call. Per erratic seed: 8 chars in i_new plus 15
+    chars for the one node = 23 serialized divides. The seed suffix is
+    re-hashed for every node created; because the loop runs from the last
+    character to the first, pseudohash(prefix + seed) can be computed as a
+    continuation from pseudohash(seed), hashing the seed once per seed.
+    Est. ~1.1x for erratic, 2-4x on the hashing share for 30-node filters.
+    (Continuation deferred: needs care with the absolute (i+1) index term.)
+    Passing text by pointer is mechanical. (Done.)
+
+### 5. Erratic-deck dead work  (lib/functions.cl:588-611)
+
+Verified. init_erratic_deck draws 52 cards then bubble-sorts them: 1,326
+compares with a data-dependent swap branch that diverges across the warp, on
+scratch memory. erratic_flush_five then only histograms the result, which is
+order-independent. The sort matters only for filters that go on to shuffle.
+
+The values come from CARDS[], a fixed contiguous 52-value range, so a
+counting sort produces the identical array with O(52) work and no
+divergence. Est. 1.2-1.8x for erratic-deck filters, nothing for others.
+
+Every other filter checked already rejects before its expensive pack/shop
+generation, and packs cannot be truncated early because duplicate locking
+changes later resampling results.
+
+### 6. The five-minute kernel build  (immolate.c:230)
+
+The NVIDIA OpenCL front end recompiles ~4,000 lines of double-heavy kernel
+on every run. Fixed cost, no throughput change, but it is paid on every
+iteration while tuning. Fix: fetch the built binary once via
+CL_PROGRAM_BINARIES, cache it on disk keyed on (device, driver, build
+options, contents of every transitively included .cl file), and reload via
+clCreateProgramWithBinary. Fall back to a source build on any failure.
+
+### 7. Seed stepping  (lib/seed.cl:3, 83-100)
+
+s_skip does a full base-35 divide and modulo across all 8 digits per seed.
+NUM_CHARS is declared as a __constant variable rather than a literal, so
+strength reduction of / and % to a multiply-high is not guaranteed
+(inferred; LLVM usually does it anyway). Roughly 5-15% on a light filter if
+it was not folding. A specialized small-stride add-with-carry is a further
+small win. (Define done; specialization deferred.)
+
+--------------------------------------------------------------------------------
+## Verified vs inferred
+--------------------------------------------------------------------------------
+Verified from source: struct layouts, call chains, loop trip counts,
+initializer semantics, launch parameters, the barrier/race defects, the
+bubble sort, the filter early-exit ordering.
+Inferred: cycle costs of fp64 divide/pow and 64-bit shifts, scratch-memory
+placement of the instance, whether pow and NUM_CHARS constant-fold, all
+speedup multipliers. Confirm the last two from a binary dump before investing
+in the deferred RNG work.
+
+--------------------------------------------------------------------------------
+## Changes applied (low risk)
+--------------------------------------------------------------------------------
+See the "Changes applied" section appended below after implementation.
+
+--------------------------------------------------------------------------------
+## Deferred (medium/high risk), in suggested order
+--------------------------------------------------------------------------------
+1. Result buffer instead of kernel printf, host-side decode and print.
+2. Batched launches with progress output and Ctrl-C handling.
+3. CACHE_SIZE per filter, with a bounds check in init_node.
+4. locked[] bitset.
+5. pseudohash continuation (hash the seed once per seed).
+6. s_skip small-stride specialization.
+7. GF(2) jump-ahead for the LuaJIT warmup (largest remaining ALU win,
+   needs bit-exact validation harness first).
+8. roundDigits divide -> reciprocal multiply (only if validated bit-exact).
+
+--------------------------------------------------------------------------------
+## How to validate any change
+--------------------------------------------------------------------------------
+Golden test: run a fixed range with a fixed cutoff on the old binary and the
+new one and diff the sorted output. Example, for several filters:
+
+    Immolate.exe -f erratic_flush_five -s 11111111 -n 20000000 -c 3 > old.txt
+    (rebuild)
+    Immolate.exe -f erratic_flush_five -s 11111111 -n 20000000 -c 3 > new.txt
+    sort old.txt > old.s && sort new.txt > new.s && fc old.s new.s
+
+The cutoff is fixed for the whole run, so the printed set is deterministic
+for a given -s, -n and -c regardless of launch geometry. When comparing
+against a build older than this change, note that the old binary raised its
+cutoff as it went and so printed a subset of what the new one prints; compare
+the old output against the new one filtered to scores >= the old maximum, or
+simply confirm every seed the old build printed appears in the new output.
+
+--------------------------------------------------------------------------------
+## Side note: macOS / Apple Silicon
+--------------------------------------------------------------------------------
+Does not build as-is (CL/cl.h vs OpenCL/cl.h include path; no __APPLE__
+branch in getExecutableDir). With those two host fixes it compiles and lists
+the GPU, but every filter fails at clCreateKernel with "newComputePipelineState
+failed" because Apple's OpenCL-on-Metal has no fp64 and the kernel is
+double throughout. Apple's OpenCL front end does accept the source, so a Mac
+is usable as a syntax checker for kernel edits, not as a runner.
+
+--------------------------------------------------------------------------------
+## Changes applied (2026-09-02) — low-risk set
+--------------------------------------------------------------------------------
+All 29 filters compile against Apple's OpenCL front end after these edits (used
+purely as a syntax/type check; Apple cannot run the fp64 kernel). Nothing was
+executed on an NVIDIA GPU from this machine, so the golden-output diff described
+above still needs to be run on the Windows box before trusting results.
+
+Host (immolate.c, lib/immolate.h, CMakeLists.txt)
+- Launch geometry decoupled. localSize is now the kernel's preferred
+  work-group multiple from the device (rounded up to 64 where allowed);
+  -g is the number of work-groups and defaults to 32 per compute unit when
+  omitted (84 CUs -> 2688 groups x 64 = 172,032 work-items on a 5080).
+  The old meaning of -g (G*G work-items in groups of G) is gone; -g 1 -n 1
+  still works for analyzer runs. Docs updated.
+- Compiled-kernel binary cache. After a source build the device binary is
+  saved to .kernel_cache/<hash>.bin next to the executable, where the hash
+  covers the build options, device name/vendor/version, driver version, the
+  generated program text (which carries the filter name) and the full
+  contents of the filter file and every lib/*.cl file. Later runs load it
+  with clCreateProgramWithBinary. Any load or build failure prints a notice
+  and falls back to a normal source build. Because some drivers (Apple's,
+  observed here) accept garbage bytes at clCreateProgramWithBinary and only
+  fail at clCreateKernel, a cache-loaded program that cannot produce the
+  kernel also deletes the cache file and rebuilds from source once.
+  --no_cache bypasses it. .kernel_cache/ is gitignored.
+  This removes the ~5 minute rebuild on every run.
+- CL_TARGET_OPENCL_VERSION raised 100 -> 120 in CMakeLists.txt. Required:
+  CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE is an OpenCL 1.1 query and
+  the headers hide it under a 1.0 target.
+- macOS builds now (OpenCL/cl.h include, _NSGetExecutablePath). Runtime on
+  Apple Silicon still fails at kernel creation for lack of fp64.
+
+Kernel
+- search.cl: the cutoff is now a plain kernel argument (the -c value) and
+  every seed scoring at or above it is printed. The old behaviour raised the
+  cutoff to the best score seen so far through a non-atomic global write plus
+  a barrier() inside a divergent branch, which is undefined behaviour and
+  would deadlock at the new work-group sizes. An intermediate version used
+  atom_max; the user chose the simpler fixed-cutoff semantics instead, so
+  there is no global write, no atomic and no per-seed global read at all.
+  FIXED_FILTER_CUTOFF is now a no-op (documented in docs/DOCUMENTATION.md).
+  Note that with erratic_flush_five the default -c 1 matches every seed, so
+  pass a meaningful -c for that filter.
+- lib/instance.cl i_new: no aggregate initializer, so the 64-node RNG cache
+  (~3 KB) is no longer zeroed per seed. Fields that were read before
+  written (locked[], params.*, rng, cache counters) are initialized
+  explicitly to the same values as before. Cache nodes are only read at
+  indices below nextFreeNode and init_node writes them first, so leaving
+  them uninitialized is safe.
+- lib/instance.cl get_node_child and lib/cache.cl resample_str: node
+  strings are built with an in-place text_append(text*, const text*)
+  instead of the by-value text_concat that copied three 260-byte structs
+  per call. pseudohash takes const text*.
+- lib/util.cl roundDigits: 10^13 is a literal instead of pow(10, 13) for
+  the d == 13 case every caller uses. 1e13 is exactly representable so a
+  correct pow returns the same value; OpenCL permits pow up to 16 ulp of
+  error, so the literal can only be more faithful, never less. The divide
+  is unchanged (a reciprocal multiply is not bit-exact).
+- lib/functions.cl init_erratic_deck: the 52 draws happen in the same
+  order, but each card is tallied into a 52-bin count as it is drawn and
+  the sorted deck is written out from the counts. The result is identical
+  to bubble-sorting (all values are the contiguous enum range C_2..S_T),
+  in 104 non-divergent steps instead of 1,326 divergent compares.
+  sort_deck itself is left in place for any other caller.
+- lib/seed.cl: NUM_CHARS is #define 35 instead of a __constant variable so
+  the / and % in s_skip and s_next are guaranteed to strength-reduce.
+
+Expected effect
+- Geometry: the dominant win, tens to hundreds of times on a 5080 once the
+  GPU is actually filled, assuming per-lane scratch does not become the
+  wall (see deferred CACHE_SIZE / bitset work if it does).
+- Everything else: roughly 1.5-3x combined on erratic_flush_five from the
+  removed zeroing, sort, struct copies and pow; less on other filters.
+- Build cache: minus ~5 minutes per run after the first.
+
+Validate on Windows with the golden-output procedure above. Because the
+default cutoff of 1 prints a large fraction of seeds on erratic_flush_five,
+use -c 3 or higher for the comparison so output volume does not dominate.
