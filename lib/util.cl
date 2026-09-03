@@ -71,12 +71,30 @@ unsigned int lsh32(unsigned int x, size_t l) {
 unsigned int rsh32(unsigned int x, size_t r) {
     return x>>r;
 }
+// Correctly rounded n / 1e13 without an fp64 divide. Consumer GPUs run fp64
+// at 1/32-1/64 rate and have no hardware fp64 divide, so `/` expands to a long
+// software sequence; this is one multiply and two fused multiply-adds.
+// Markstein: if r is the correctly rounded reciprocal of b, then
+//   q = fl(n*r); e = fma(-q, b, n); q' = fma(e, r, q)
+// is the correctly rounded quotient n/b. OpenCL requires fp64 `/` and fma() to
+// be correctly rounded, so q' is bit-identical to n/1e13. A plain n*r is NOT
+// (it differs in ~20% of cases); the residual step is what makes it exact.
+// Verified on the host against `/` for 1.28e9 integer n in [0, 1e13].
+inline double div_1e13(double n) {
+    const double b = 1e13;
+    const double r = 1.0 / 1e13; // compile-time constant, correctly rounded
+    double q = n * r;
+    double e = fma(-q, b, n);
+    return fma(e, r, q);
+}
 double roundDigits(double f, int d) {
-    // Every caller passes d = 13. 10^13 is exactly representable, so the
-    // literal is what a correct pow() returns; avoiding the call guarantees
-    // no per-draw double-precision pow on the hot path. The divide is kept
-    // because multiplying by 1e-13 is not bit-exact.
-    double power = (d == 13) ? 1e13 : pow((double)10, d);
+    // Every caller passes d = 13; 10^13 is exactly representable. Balatro's
+    // pseudoseed rounds its state to 13 digits, so this step must stay
+    // bit-faithful; only the way the division is computed changed.
+    if (d == 13) {
+        return div_1e13(round(f * 1e13));
+    }
+    double power = pow((double)10, d);
     return round(f*power)/power;
 }
 

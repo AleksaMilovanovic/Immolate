@@ -565,3 +565,48 @@ resident warps (consistent with the driver rejecting 64-wide groups), or the
 per seed. Both point the same way: the next gain must come from doing less
 work per seed, not from fitting more lanes. Deferred items 3 and 4
 (CACHE_SIZE, bitset) are done and closed; item 7 (jump-ahead) is next.
+
+--------------------------------------------------------------------------------
+## Measurement (2026-09-03) — where the time actually goes
+--------------------------------------------------------------------------------
+RTX 5080, -s 11111111 -n 500000000 -c 11, 1344 groups of 32:
+
+    erratic_flush_five (full)     3.02 s   100%
+    bench_hash_fp64               1.85 s    61%   52 node advances via get_node_child, no RNG
+    bench_rng_int                 0.88 s    29%   52 randomseed + draw, no hashing
+    remainder (i_new, s_skip,    ~0.30 s    10%
+      histogram, loop)
+
+The fp64 node-advance path dominates. The LuaJIT warmup jump-ahead (deferred
+item 7) would therefore cap at ~1.3x even if it made the RNG free; it drops
+in priority behind removing fp64 divides.
+
+Compiler report (ptxas via --verbose_build, sm_120a):
+    95 registers/thread, 0 spill stores/loads, 4464-byte stack frame, 0 barriers
+
+Occupancy is register-bound: 65,536 regs/SM at 96 (allocation granularity)
+per thread -> 682 threads -> 21 warps/SM = 672 threads. The measured plateau
+at 16 groups of 32 (512 threads) is the largest power-of-two count that fits.
+This is also why 64-wide groups were rejected and why the struct shrink moved
+nothing: the struct lives in the local-memory stack frame regardless of size,
+and registers, not memory, cap resident warps. Cutting below 64 regs/thread
+would need the kernel's math restructured; not pursued.
+
+Default -g raised to 32 groups per CU (2688 on a 5080) so the 21 resident
+warps per SM always have queued work behind them; measured difference vs 16
+is within noise.
+
+### Change applied: fp64 divide removed from roundDigits (lib/util.cl)
+round(f*1e13)/1e13 became a Markstein-corrected reciprocal:
+    q = n*r; e = fma(-q, 1e13, n); q' = fma(e, r, q)   with r = fl(1/1e13)
+OpenCL mandates correctly rounded fp64 `/` and fma(), so q' is bit-identical
+to n/1e13. (A bare n*r differs in ~20% of cases, which is why it was not
+done earlier.) Host verification against `/`: 1.28e9 integer n across
+[0, 1e13], 2e7 random n, boundary values, and 1.56e8 chained advances
+through the exact get_node_child recurrence — zero mismatches. Replaces one
+software fp64 divide (dozens of instructions on consumer NVIDIA) per node
+advance with one multiply and two FMAs. Windows golden run still required.
+
+Next candidate: the same treatment for the per-character divide in
+pseudohash (1.1239285023/num), which is serially dependent and runs 8 times
+per seed in i_new plus once per character of each new node's name.
