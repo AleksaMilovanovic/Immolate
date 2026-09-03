@@ -623,3 +623,45 @@ The hash path gained less than a single-divide-per-advance model predicts,
 which suggests the divide was not the whole of that path's cost: fract,
 round, and the dependent chain through 51 advances each contribute. The
 s_skip fix was also confirmed on a run with no -s: output clean.
+
+--------------------------------------------------------------------------------
+## Change applied (2026-09-03) — fp64 divide removed from pseudohash (lib/util.cl)
+--------------------------------------------------------------------------------
+Measured before this change, 16 groups/CU, roundDigits already divide-free:
+erratic_flush_five 500M seeds 3.00 s (was 3.5 s before the roundDigits
+change: -14%).
+
+pseudohash's per-character 1.1239285023/num was the last fp64 divide on the
+hot path: 8 per seed in i_new plus one per character of each new node's
+name, all serially dependent. The divisor varies, so unlike div_1e13 the
+reciprocal is refined at run time: float reciprocal seed (~24 bits), two
+Newton steps (e0 = fma(-b,r,1); y1 = fma(e0,r,r); y2 = fma(e0*e0,y1,y1)),
+then the Markstein residual step (q = a*y2; rr = fma(-b,q,a); fma(rr,y2,q)).
+Correctly rounded fp64 `/` and fma() are mandated by OpenCL, so the result is
+bit-identical to a/b. Falls back to `/` for b < 1e-37, which cannot occur
+for a fract() output in practice.
+
+Host validation against `/`: 3e8 divisors (half uniform in (0,1], half
+log-uniform down to 1e-30), 2e7 random strings of 1..30 chars over a wide
+alphabet, 3e6 seed strings, and 1e7 node-name strings (e.g. "erratic" or
+"Joker1sho1" followed by 8 seed chars), each also with the float seed
+perturbed by -4..+4 ulp to model an approximate native reciprocal: zero
+mismatches in every set.
+
+Side note found while validating: the kernel's `(1<<k)` with k = 32 is a
+shift by the operand width, which C and OpenCL C leave undefined. NVIDIA
+lowers it as a masked shift, giving 1, so on that driver the int_part /
+fract_part elaboration is a no-op scale by 1. It was left exactly as written
+since changing it would change output on any driver that behaves otherwise.
+
+Windows golden run still required; perkeo_observatory is the important
+filter here since it hashes many distinct node names per seed.
+
+Independent verification (read-only, second model family): no behaviour-
+changing defect. Confirmed the two Newton steps leave the reciprocal within
+~1 ulp (error ~delta^4 from a <= 2^-22 seed, then fp64 rounding dominates),
+which satisfies the Markstein / Cornea-Harrison-Tang precondition for the
+residual step to be correctly rounded; re-ran 3e8 random and 3e8 adversarial
+(rounding-boundary) divisors with perturbed seeds, zero mismatches; confirmed
+num == 0 gives +inf on both old and new paths; confirmed the host passes no
+fast-math or mad-enable build options. Two comment inaccuracies fixed.

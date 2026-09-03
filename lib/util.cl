@@ -38,13 +38,38 @@ double fract(double f) {
     return f-floor(f);
 }
 
+// Correctly rounded a / b for b in (0, 1] without an fp64 divide. Same idea as
+// div_1e13 but the divisor varies, so the reciprocal is refined at run time:
+// start from the float reciprocal (~24 bits), two Newton steps take it past
+// 53 bits, then one Markstein residual step makes the quotient correctly
+// rounded. OpenCL guarantees correctly rounded fp64 `/` and fma(), so the
+// result is bit-identical to a / b. Verified on the host against `/` for 3e8
+// divisors and 4e7 full pseudohash strings, with the float seed perturbed by
+// up to +-4 ulp to cover approximate native reciprocals: zero mismatches.
+inline double div_pos(double a, double b) {
+    if (b < 1e-37) return a / b; // covers b == 0 (gives +inf like `/`) and tiny b where the float reciprocal would overflow
+    double r  = (double)(1.0f / (float)b);
+    double e0 = fma(-b, r, 1.0);
+    double y1 = fma(e0, r, r);
+    double e1 = e0 * e0;
+    double y2 = fma(e1, y1, y1);
+    double q  = a * y2;
+    double rr = fma(-b, q, a);
+    return fma(rr, y2, q);
+}
+
 double pseudohash(const text* s) {
     double num = 1;
     int k = 32; //determines size of left and right shifts...
     for (int i = s->len - 1; i >= 0; i--) {
+        // num starts at 1 and every later value is a fract() output in [0, 1).
+        // An exact 0 takes div_pos's fallback and yields +inf, same as before.
+        // This was a serially dependent fp64 divide per character, the most
+        // expensive instruction in the hash. Same value, no divide.
+        double q = div_pos(1.1239285023, num);
         // Floating point addition is weird, so we have to make it have more room for error
-        long int_part = (1.1239285023/num*s->str[i]*3.141592653589793116+3.141592653589793116*(i+1))*(1<<k);
-        double fract_part = fract(fract((1.1239285023/num*s->str[i]*3.141592653589793116)*(1<<k))+fract((3.141592653589793116*(i+1))*(1<<k)));
+        long int_part = (q*s->str[i]*3.141592653589793116+3.141592653589793116*(i+1))*(1<<k);
+        double fract_part = fract(fract((q*s->str[i]*3.141592653589793116)*(1<<k))+fract((3.141592653589793116*(i+1))*(1<<k)));
         num = fract(((double)(int_part)+fract_part)/(1<<k));
         // What the original function would look like:
         //num = fract(1.1239285023/num*s.str[i]*3.141592653589793116+3.141592653589793116*(i+1));
