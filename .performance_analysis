@@ -592,9 +592,12 @@ nothing: the struct lives in the local-memory stack frame regardless of size,
 and registers, not memory, cap resident warps. Cutting below 64 regs/thread
 would need the kernel's math restructured; not pursued.
 
-Default -g raised to 32 groups per CU (2688 on a 5080) so the 21 resident
-warps per SM always have queued work behind them; measured difference vs 16
-is within noise.
+Default -g was briefly raised to 32 groups per CU on the theory that the 21
+resident warps per SM want queued work behind them. Measurement disagreed:
+erratic_flush_five went 3.02 s -> 3.3 s at 32/SM even with the cheaper
+roundDigits, matching the earlier sweep (16/SM 3.55 s, 32/SM 4.0 s). The
+default is back at 16 per CU. Observed behaviour wins over the register
+arithmetic here.
 
 ### Change applied: fp64 divide removed from roundDigits (lib/util.cl)
 round(f*1e13)/1e13 became a Markstein-corrected reciprocal:
@@ -610,3 +613,13 @@ advance with one multiply and two FMAs. Windows golden run still required.
 Next candidate: the same treatment for the per-character divide in
 pseudohash (1.1239285023/num), which is serially dependent and runs 8 times
 per seed in i_new plus once per character of each new node's name.
+
+Measured after the roundDigits change (RTX 5080, same ranges, output
+identical to before for all three filters):
+    bench_hash_fp64      1.85 s -> 1.58 s   (-15%)
+    erratic_flush_five   3.02 s -> 3.3 s    (at 32 groups/CU; see above)
+    perkeo_observatory   0.5 s  -> 0.48 s
+The hash path gained less than a single-divide-per-advance model predicts,
+which suggests the divide was not the whole of that path's cost: fract,
+round, and the dependent chain through 51 advances each contribute. The
+s_skip fix was also confirmed on a run with no -s: output clean.
