@@ -272,8 +272,14 @@ above still needs to be run on the Windows box before trusting results.
 Host (immolate.c, lib/immolate.h, CMakeLists.txt)
 - Launch geometry decoupled. localSize is now the kernel's preferred
   work-group multiple from the device (rounded up to 64 where allowed);
-  -g is the number of work-groups and defaults to 32 per compute unit when
-  omitted (84 CUs -> 2688 groups x 64 = 172,032 work-items on a 5080).
+  -g is the number of work-groups and defaults to 8 per compute unit when
+  omitted (84 CUs -> 672 groups x 32 = 21,504 work-items on a 5080).
+  First Windows measurements (RTX 5080, erratic_flush_five, 20M seeds,
+  -c 11): -g 84 -> 1.42 s, -g 336 -> 0.76 s, versus ~45 s on the old build,
+  i.e. 30-60x. An initial version rounded localSize up to 64, which the
+  driver rejected with CL_INVALID_WORK_GROUP_SIZE (-54) for this kernel;
+  the launch now uses the preferred multiple as-is and halves it once on
+  that error.
   The old meaning of -g (G*G work-items in groups of G) is gone; -g 1 -n 1
   still works for analyzer runs. Docs updated.
 - Compiled-kernel binary cache. After a source build the device binary is
@@ -330,9 +336,10 @@ Kernel
   the / and % in s_skip and s_next are guaranteed to strength-reduce.
 
 Expected effect
-- Geometry: the dominant win, tens to hundreds of times on a 5080 once the
-  GPU is actually filled, assuming per-lane scratch does not become the
-  wall (see deferred CACHE_SIZE / bitset work if it does).
+- Geometry: measured 30-60x on a 5080 (see above). The remaining question
+  is how far group count scales; the register footprint of the instance
+  struct is what limits resident groups per SM, so the deferred
+  CACHE_SIZE / bitset work is the next lever on occupancy.
 - Everything else: roughly 1.5-3x combined on erratic_flush_five from the
   removed zeroing, sort, struct copies and pow; less on other filters.
 - Build cache: minus ~5 minutes per run after the first.

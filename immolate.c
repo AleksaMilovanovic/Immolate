@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 32 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).");
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 8 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).");
             return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
@@ -143,9 +143,6 @@ int main(int argc, char **argv) {
     char include_path[MAX_PATH+6];
     char kernel_path[MAX_PATH+12];
     getExecutableDir(executable_dir);
-    strcpy_s(include_path, sizeof include_path, "-I \"");
-    strcat_s(include_path, sizeof include_path, executable_dir);
-    strcat_s(include_path, sizeof include_path, "\"");
     strcpy_s(kernel_path, sizeof kernel_path, executable_dir);
     strcat_s(kernel_path, sizeof kernel_path, PATH_SEPARATOR);
     strcat_s(kernel_path, sizeof kernel_path, "search.cl");
@@ -159,7 +156,13 @@ int main(int argc, char **argv) {
             fprintf_s(stderr, "Failed to load kernel.\n");
             exit(1);
         }
+        // The kernel sources live in the working directory, so the include
+        // path, cache-key file hashing and cache directory must use it too.
+        strcpy_s(executable_dir, sizeof executable_dir, ".");
     }
+    strcpy_s(include_path, sizeof include_path, "-I \"");
+    strcat_s(include_path, sizeof include_path, executable_dir);
+    strcat_s(include_path, sizeof include_path, "\"");
     ssKernelCode = (char*)malloc(MAX_CODE_SIZE);
     ssKernelBuf = (char*)malloc(MAX_CODE_SIZE);
     // Set include information
@@ -360,14 +363,18 @@ build_program:
     if (err != CL_SUCCESS || preferredMultiple == 0) preferredMultiple = 32;
     err = clGetKernelWorkGroupInfo(ssKernel, device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(maxWorkGroup), &maxWorkGroup, NULL);
     if (err != CL_SUCCESS || maxWorkGroup == 0) maxWorkGroup = preferredMultiple;
+    // Use the preferred multiple as-is (32 on NVIDIA, 64 on AMD). Rounding it
+    // up to 64 failed on an RTX 5080 with CL_INVALID_WORK_GROUP_SIZE: this
+    // kernel's register footprint is large enough that 64 lanes do not fit in
+    // one group, and the driver reports the device maximum rather than the
+    // kernel's real limit for CL_KERNEL_WORK_GROUP_SIZE.
     size_t localSize = preferredMultiple;
-    while (localSize * 2 <= 64 && localSize * 2 <= maxWorkGroup) localSize *= 2;
     if (localSize > maxWorkGroup) localSize = maxWorkGroup;
     if (numGroups == 0) {
         cl_uint computeUnits = 1;
         err = clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(computeUnits), &computeUnits, NULL);
         if (err != CL_SUCCESS || computeUnits == 0) computeUnits = 1;
-        numGroups = computeUnits * 32;
+        numGroups = computeUnits * 8;
     }
     size_t globalSize = (size_t)numGroups * localSize;
     printf_s("Launching %zu work-groups of %zu work-items (%zu total).\n", (size_t)numGroups, localSize, globalSize);
@@ -376,6 +383,13 @@ build_program:
     printf_s("Starting searcher...\n");
     clock_t begin = clock();
     err = clEnqueueNDRangeKernel(queue, ssKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
+    if (err == CL_INVALID_WORK_GROUP_SIZE && localSize > 1) {
+        // The driver rejected the group size for this kernel. Halve it and retry.
+        printf_s("Work-group size %zu rejected by the driver, retrying with %zu.\n", localSize, localSize / 2);
+        localSize /= 2;
+        globalSize = (size_t)numGroups * localSize;
+        err = clEnqueueNDRangeKernel(queue, ssKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
+    }
     clErrCheck(err, "clEnqueueNDRangeKernel - Executing OpenCL kernel");
 
     // Clean up
