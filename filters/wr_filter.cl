@@ -1,5 +1,14 @@
 // Searches for seeds with Perkeo from The Soul in the first ante, plus a buyable Hermit or Temperance tarot in the first shop.
 // This keeps the Perkeo-from-Soul requirement while removing the second-legendary requirement.
+
+// A seed that reaches ante 38 creates up to ~475 distinct RNG nodes (17-18 per
+// ante for shop card types, rarities, editions, stickers, tarots, planets,
+// packs, and pack jokers). The default cache holds 64. Beyond that, init_node
+// reuses the last slot, so from about ante 6 onward every new node clobbers
+// the previous one and the tallies are garbage: on 400 deep test seeds the
+// 64-node diet cola count differed from the true value on every single seed
+// (e.g. 9 vs 18, 0 vs 20, 201 vs 26). 512 covers the worst case observed.
+#define CACHE_SIZE 512
 #include "lib/immolate.cl"
 
 /* __constant item rerollPool[] = {
@@ -52,33 +61,69 @@ shopitem reroll_shop_item(instance* inst, int ante, int altSeedIndex) {
     return item;
 } */
 
+// Exact emulation of the soul polls inside arcana_pack / spectral_pack, without
+// generating the tarot/spectral cards. RNG state is per node: the soul polls
+// live on node soul_<Tarot|Spectral><ante>, the card draws on a different node
+// that this filter never touches again, and the pack unlocks everything it
+// drew before returning. So whether a Soul appears depends only on the soul
+// node's draw sequence, reproduced here draw for draw, including the rule
+// that a forced The_Soul / Black_Hole is locked and stops its own poll for the
+// rest of the pack. Returns true if any card in the pack would be The_Soul.
+#if V_AT_MOST(1,0,0,10)
+    #define WR_SOUL_POLL(inst, rt, ante) random(inst, (__private ntype[]){N_Type, N_Type}, (__private int[]){R_Soul, rt}, 2)
+#else
+    #define WR_SOUL_POLL(inst, rt, ante) random(inst, (__private ntype[]){N_Type, N_Type, N_Ante}, (__private int[]){R_Soul, rt, ante}, 3)
+#endif
+bool wr_pack_has_soul(instance* inst, pack _pack, int ante) {
+    bool soulLocked = i_locked(inst, The_Soul);
+    bool bhLocked = i_locked(inst, Black_Hole);
+    bool showman = inst->params.showman;
+    if (_pack.type == Arcana_Pack) {
+        for (int i = 0; i < _pack.size; i++) {
+            if ((showman || !soulLocked) && WR_SOUL_POLL(inst, R_Tarot, ante) > 0.997) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Spectral pack: two polls per card, Black Hole's result overrides the Soul's.
+    for (int i = 0; i < _pack.size; i++) {
+        item forced = RETRY;
+        if ((showman || !soulLocked) && WR_SOUL_POLL(inst, R_Spectral, ante) > 0.997) {
+            forced = The_Soul;
+        }
+        if ((showman || !bhLocked) && WR_SOUL_POLL(inst, R_Spectral, ante) > 0.997) {
+            forced = Black_Hole;
+        }
+        if (forced == The_Soul) return true;
+        if (forced == Black_Hole && !showman) bhLocked = true;
+    }
+    return false;
+}
+
+// Shop slot reduced to what this filter reads: the joker's identity, or RETRY
+// for a non-joker slot. next_shop_item also polled stickers and edition and
+// drew the tarot/planet for non-joker slots; those nodes are ante-specific and
+// antes 1-2 are never revisited, so skipping them changes nothing observable.
+item wr_shop_joker(instance* inst, int ante) {
+    shop shopInstance = get_shop_instance(inst);
+    double card_type = random(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2) * get_total_rate(shopInstance);
+    if (get_item_type(shopInstance, card_type) != ItemType_Joker) return RETRY;
+    return next_joker(inst, S_Shop, ante);
+}
+
 long filter(instance* inst) {
-    int soulCount = 0;
     next_pack(inst, 1); // The first shop pack is always a Buffoon Pack in this setup.
 
     // First shop pack must contain The Soul and it must award Perkeo.
-    for (int packIndex = 1; packIndex <= 1; packIndex++) {
-        pack _pack = pack_info(next_pack(inst, 1));
-        item cards[5];
-
-        if (_pack.type == Arcana_Pack) {
-            arcana_pack(cards, _pack.size, inst, 1);
-        } else if (_pack.type == Spectral_Pack) {
-            spectral_pack(cards, _pack.size, inst, 1);
-        } else {
-            continue;
-        }
-
-        for (int i = 0; i < _pack.size; i++) {
-            if (cards[i] == The_Soul) {
-                if (next_joker(inst, S_Soul, 1) != Perkeo) {
-                    return 0;
-                }
-                soulCount++;
-            }
-        }
+    pack firstPack = pack_info(next_pack(inst, 1));
+    if (firstPack.type != Arcana_Pack && firstPack.type != Spectral_Pack) {
+        return 0;
     }
-    if (soulCount == 0) {
+    if (!wr_pack_has_soul(inst, firstPack, 1)) {
+        return 0;
+    }
+    if (next_joker(inst, S_Soul, 1) != Perkeo) {
         return 0;
     }
 
@@ -88,36 +133,22 @@ long filter(instance* inst) {
     for (int ante = 1; ante <= 2; ante++) {
         int shopItems = (ante == 1) ? 4 : 10;
         for (int i = 1; i <= shopItems; i++) {
-            shopitem shopItem = next_shop_item(inst, ante);
-            /* int rerollIndex = 0;
-            while (shopItem.type == ItemType_Joker && should_reroll_joker(shopItem.value)) {
-                rerollIndex++;
-                if (rerollIndex % 2 == 1) {
-                    shopItem = reroll_shop_item(inst, ante, 2);
-                } else {
-                    shopItem = reroll_shop_item(inst, ante, 3);
-                }
-            } */
-
-            if (shopItem.type == ItemType_Joker) {
-                if (shopItem.value == Brainstorm) foundBrainstorm = true;
-                if (shopItem.value == Blueprint) foundBlueprint = true;
-            }
+            item joker = wr_shop_joker(inst, ante);
+            /* Reroll logic previously lived here; see the commented block above. */
+            if (joker == Brainstorm) foundBrainstorm = true;
+            if (joker == Blueprint) foundBlueprint = true;
         }
 
         int packs = (ante == 1) ? 3 : 6;
         for (int p = 1; p <= packs; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
-            jokerdata jokers[5];
+            item jokers[5];
 
             if (_pack.type == Buffoon_Pack) {
-                buffoon_pack_detailed(jokers, _pack.size, inst, ante);
+                buffoon_pack(jokers, _pack.size, inst, ante);
                 for (int j = 0; j < _pack.size; j++) {
-                    /*if (should_reroll_joker(jokers[j].joker)) {
-                        continue;
-                    }*/
-                    if (jokers[j].joker == Brainstorm) foundBrainstorm = true;
-                    if (jokers[j].joker == Blueprint) foundBlueprint = true;
+                    if (jokers[j] == Brainstorm) foundBrainstorm = true;
+                    if (jokers[j] == Blueprint) foundBlueprint = true;
                 }
             }
         }

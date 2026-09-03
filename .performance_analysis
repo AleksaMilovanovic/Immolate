@@ -700,3 +700,78 @@ probe_hash.cl was added as a diagnostic: it prints the device compiler's
 value of `1 << 32` and hashedSeed("11111111"). Once the GPU value is known
 the shift can be replaced by that literal, which is output-identical on
 NVIDIA by construction and removes the undefined behaviour.
+
+Measured after the pseudohash change (RTX 5080, same ranges): erratic 3.0 s
+(unchanged), bench_hash_fp64 1.65 s (was 1.58), perkeo 0.55 s (was 0.48),
+all three outputs identical. Timing-neutral within noise: the per-character
+divide was not a large share of the hash path. Kept for the removed
+software-divide sequence; no further kernel-level work planned.
+
+--------------------------------------------------------------------------------
+## Filter-level work: filters/wr_filter.cl (2026-09-03)
+--------------------------------------------------------------------------------
+Per-seed cost model for this filter. RNG state is per node, so calls on one
+node never affect another; the expensive operation is *creating* a node,
+which hashes the node name plus the 8-character seed (18-20 chars, one
+div_pos and ~10 fp64 ops each). A draw on an existing node is cheaper.
+
+Gate 1 (every seed): i_new hashes the seed (8 chars); next_pack creates node
+"shop_pack1"+seed (18 chars) and draws once. 67% of seeds return here. The
+other 33% (Arcana or Spectral pack) then ran arcana_pack/spectral_pack, which
+creates the soul node "soul_Tarot1"+seed (19 chars) AND the tarot node
+"Tarotar11"+seed (17 chars), and draws 2 per card (soul poll, tarot). The
+filter only asks whether any card is The_Soul; the tarot draws feed a node
+that this filter never touches again and leave no locks behind
+(arcana_pack unlocks everything it drew). Replaced with an exact emulation
+of the soul-poll sequence alone: same node, same draw order, same
+lock-dependent skipping (The_Soul / Black_Hole become locked once forced),
+early return on the first Soul. Saves ~17 hash chars and ~4 draws on 33% of
+seeds, roughly 15% of the filter's total per-seed work.
+
+Gate 2 (0.08% of seeds): next_shop_item generated full joker info including
+sticker and edition polls (nodes etperpollN, edishoN) and drew tarots/planets
+for non-joker slots (TarotshoN, PlanetshoN); buffoon_pack_detailed likewise.
+Only joker identity is used, and the ante-1/2 nodes are never reused (later
+antes use ante-suffixed nodes). Replaced with card-type draw + next_joker for
+joker slots and buffoon_pack for packs. Exact; saves ~8 node creations per
+ante but on too few seeds to matter (<1% of total). Included because it is
+the same argument and costs nothing.
+
+Gates 3 and 4 unchanged.
+
+Remaining lever specifically for this filter: deferred library item 5 (hash
+the seed suffix once per seed and continue from that state for each node
+name). Node creation would drop from ~18 to ~10 hash chars, cutting this
+filter's dominant cost by roughly 40%. Not done: kernel work is closed unless
+the user reopens it.
+
+### wr_filter results (host build of the kernel, arm64)
+Score-for-score identical to the original filter over 32.2M consecutive
+seeds (ranks 1M-1.2M and 10M-42M). Gate pass rates per 4M seeds: 1.33M
+Arcana/Spectral first pack, 14,600 with a Soul, 2,846 Perkeo, 2 with both
+copy jokers, 1 past the tag gate. Host CPU timing, same 3M seeds: old
+1.88 s, new 1.44 s (1.3x). GPU speedup should be similar or slightly larger
+since the removed work is hash-heavy.
+
+### wr_filter correctness bug found: RNG node cache overflow
+A seed that survives every gate creates up to ~475 distinct RNG nodes over
+antes 3-38 (measured max on 2,000 forced-deep seeds; 17-18 new nodes per
+ante). The default cache is 64 nodes. Past that, init_node reuses the last
+slot, so from roughly ante 6 on every new node overwrites the previous one
+and each draw restarts from a freshly hashed state instead of continuing
+its stream. Effect measured by running the ante 3-38 body directly on 400
+seeds with a 64-node vs an unbounded cache: the diet cola tally differed on
+400 of 400 (e.g. 9 vs 18, 0 vs 20, 201 vs 26). Every score this filter has
+printed so far (the 4,100 seeds above cutoff 40,000) was computed with a
+corrupted tally; the gate outcomes (Perkeo, copy jokers, tags) were
+correct because those happen before the cache fills.
+
+Before the library change that added the overflow guard, the same overflow
+wrote past the end of the array into hashedSeed/rng/locked, so the old
+results were corrupted differently but no less. Fix: `#define CACHE_SIZE
+512` at the top of wr_filter.cl, before the include (analyzer.cl does the
+same with 1000). Verified: with 512 nodes the ante 3-38 tallies match the
+unbounded cache on all 400 deep seeds, and gate-region scores are unchanged.
+Cost: the cache is 16 bytes per node, so the per-lane struct grows by ~7 KB.
+Per-lane memory was shown not to limit throughput on the 5080 (see above),
+so this should be nearly free; confirm with a timing run.
