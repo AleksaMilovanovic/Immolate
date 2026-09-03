@@ -135,8 +135,20 @@ bool wr_gate1(instance* inst) {
 // lanes running 14 shop items + 9 packs while the rest wait), and pass 2 is
 // already a tiny fraction of the total.
 #define HAS_PREFILTER
+// WR_PREFILTER_LEVEL 1: pack type only (one node, one draw, uniform across
+// lanes; passes 33% of seeds to pass 2). Level 2: all of gate 1 (passes
+// 0.07%, but lanes diverge on the soul polls and the Perkeo draw).
+#ifndef WR_PREFILTER_LEVEL
+#define WR_PREFILTER_LEVEL 2
+#endif
 bool prefilter(instance* inst) {
+#if WR_PREFILTER_LEVEL == 1
+    next_pack(inst, 1);
+    pack firstPack = pack_info(next_pack(inst, 1));
+    return firstPack.type == Arcana_Pack || firstPack.type == Spectral_Pack;
+#else
     return wr_gate1(inst);
+#endif
 }
 
 long filter(instance* inst) {
