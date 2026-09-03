@@ -45,14 +45,33 @@ seed s_new_c8(char8 str_seed) {
 char s_char_at(seed* s, int c) {
     return SEEDCHARS[s->data[c]];
 }
+// Seeds are numbered in bijective base 35: rank 0 is the empty seed, ranks
+// 1..35 are the one-character seeds "1".."Z", ranks 36..1260 the two-character
+// seeds, and so on. This is the ordering the searcher walks.
 long s_tell(seed* s) {
-    long loc = 0;
-    long mult = 0;
+    long rank = 0;
     for (int i = 0; i < s->len; i++) {
-        loc += s->data[i]*mult;
-        mult *= NUM_CHARS;
+        rank = rank * NUM_CHARS + (long)s->data[i] + 1;
     }
-    return loc;
+    return rank;
+}
+// Inverse of s_tell.
+seed s_from_rank(long rank) {
+    seed s;
+    s.data = 0;
+    s.len = 0;
+    while (rank > 0 && s.len < 8) {
+        long r1 = rank - 1;
+        s.data[s.len] = r1 % NUM_CHARS; // least significant digit first, reversed below
+        rank = r1 / NUM_CHARS;
+        s.len++;
+    }
+    for (int lo = 0, hi = s.len - 1; lo < hi; lo++, hi--) {
+        ulong t = s.data[lo];
+        s.data[lo] = s.data[hi];
+        s.data[hi] = t;
+    }
+    return s;
 }
 text s_to_string(seed* s) {
     text str;
@@ -80,22 +99,14 @@ void s_next(seed* s) {
     }
     s->len += carry;
 }
+// Advance the seed by n positions in the bijective base-35 ordering.
+// The previous digit-wise implementation failed to borrow when it had to
+// grow the seed by a digit whose value came out as -1, and stored that -1 as
+// a digit; s_to_string then read one byte before SEEDCHARS. With the default
+// empty starting seed roughly one work-item in twelve started on such a
+// corrupt seed and searched garbage for the whole run. Going through the rank
+// is exact for every start seed and stride, and costs about the same: one
+// multiply per digit in, one divide per digit out.
 void s_skip(seed* s, long n) {
-    int carry = 0;
-    int i = s->len - 1;
-    int j = 0;
-    ulong8 data = 0;
-    while(n > 0 || carry || j < s->len){
-        int sum = carry + (n % NUM_CHARS);
-        sum += s->data[i * (i >= 0)] * (i >= 0) + -1 * (i < 0); //Branchless equivalent of if(i >= 0) {sum += s->data[i];} else {sum--;}
-        data[j] = sum % NUM_CHARS;
-        carry = sum >= NUM_CHARS;
-        n /= NUM_CHARS;
-        i--;
-        j++;
-    }
-    s->len += (j - s->len) * (s->len <= j);
-    for(int x = 0; x < s->len; x++){
-        s->data[s->len-1-x] = data[x];
-    }
+    *s = s_from_rank(s_tell(s) + n);
 }

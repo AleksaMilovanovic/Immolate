@@ -460,7 +460,8 @@ a size reduction that must stay byte-identical. Left as a separate item; see
   (`no member named '_item' in 'struct ShopItem'`) and orbital_test (`too
   many arguments` to next_joker). Both failures are present on unmodified
   HEAD and are unrelated to these changes; the pass/fail set is identical
-  before and after.
+  before and after. (Both filters were subsequently deleted at the user's
+  request; see below.)
 - Differential test against HEAD. The kernel compiles as host C with a small
   shim (ext_vector_type for the OpenCL vector types, __constant -> const,
   -fgnu89-inline). A driver hashes, per seed: the seed string, hashedSeed,
@@ -496,3 +497,71 @@ loop), which matters most for cache-heavy filters.
 9. Fix s_skip's negative-digit path (short start seed + large stride prints
    truncated seed strings today). Changes output, so it needs its own golden
    run; doing it first would unblock the uchar8 seed storage above.
+
+--------------------------------------------------------------------------------
+## Changes applied (2026-09-03) — s_skip correctness fix and filter deletions
+--------------------------------------------------------------------------------
+### s_skip rewritten via the seed rank (lib/seed.cl)
+Seeds are ordered in bijective base 35: rank 0 is the empty seed, 1..35 the
+one-character seeds, 36..1260 the two-character seeds, up to rank
+2,318,107,019,760 = "ZZZZZZZZ". s_tell now returns that rank (the old s_tell
+was dead code and wrong: it multiplied by a `mult` that started at 0),
+s_from_rank is its inverse, and s_skip(s, n) is simply
+s_from_rank(s_tell(s) + n).
+
+Why: the old digit-wise s_skip, when it had to grow the seed by a digit whose
+computed value was -1, stored the -1 as a digit. s_to_string then indexed
+SEEDCHARS[-1], producing a corrupt string that pseudohash consumed, so every
+seed that work-item visited for the rest of the run was wrong. Measured on
+the host with the old code: with the default empty starting seed, 7 of 256
+work-items under the old geometry and 3,609 of 43,008 under the new one
+started on a corrupt seed (roughly 1 in 12). Any 8-character -s value was
+unaffected, which is why the earlier golden runs were clean.
+
+Host-side differential test against the old s_skip:
+- 8-character start seeds, six strides from 1 to 33,554,432, 2,000 steps
+  each: identical on all 48,007 in-range steps. The 11,993 mismatches were
+  all past "ZZZZZZZZ", where the old code grew a 9th digit; the new code
+  stays at length 8 (the kernel's -n bound never reaches there anyway).
+- Short start seeds ("", "1", "Z", "AB", "ZZZ", "1234"): wherever the old
+  code produced valid digits the two agree (107,960 cases, 0 disagreements);
+  the 40 cases where the old code was corrupt are now valid seeds.
+- 200,000 unit steps from the empty seed match s_from_rank(k) exactly and
+  contain no invalid digit; s_tell(s_from_rank(r)) == r for 430k sampled
+  ranks including the last 5,000; the rank->string mapping was cross-checked
+  against an independent Python implementation.
+
+Cost: one multiply per digit in, one divide per digit out, about the same
+as before; roughly 5 KB of per-seed work is unaffected.
+
+Output impact: identical for any run with an 8-character -s. For shorter or
+absent -s, the ~8% of lanes that previously searched garbage now search
+their correct seeds, so the printed set changes (gains real seeds, loses
+bogus ones).
+
+### Deleted filters
+filters/longest_joker_name.cl and filters/orbital_test.cl did not compile
+against the current library on HEAD (a removed ShopItem field and a changed
+next_orbital_tag signature respectively). Removed at the user's request.
+docs/existingfilters.md did not list them.
+
+Front-end check after these changes: all 27 remaining filters pass
+`clang -x cl -cl-std=CL1.2 -target spir64-unknown-unknown`.
+
+--------------------------------------------------------------------------------
+## Measurement (2026-09-03) — struct shrink had no throughput effect
+--------------------------------------------------------------------------------
+RTX 5080, -s 11111111, groups of 32, 1344 groups:
+    erratic_flush_five  500M seeds  -c 11   before shrink 3.55 s, after 3.5 s
+    perkeo_observatory  100M seeds  -c 1    ~0.5 s both
+    erratic_flush_five with #define CACHE_SIZE 4 (per-lane struct ~600 B): 3.5 s
+Output identical to HEAD in every case.
+
+Conclusion: per-lane memory is not what caps occupancy. Halving the struct,
+then cutting it by a further 60%, moved nothing. The remaining ceiling is
+compute: either the register footprint of the inlined fp64 kernel limits
+resident warps (consistent with the driver rejecting 64-wide groups), or the
+1/64-rate fp64 units are saturated by the ~75 divides and ~150 multiplies
+per seed. Both point the same way: the next gain must come from doing less
+work per seed, not from fitting more lanes. Deferred items 3 and 4
+(CACHE_SIZE, bitset) are done and closed; item 7 (jump-ahead) is next.

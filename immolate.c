@@ -10,6 +10,7 @@ int main(int argc, char **argv) {
     unsigned int deviceID = 0;
     unsigned int numGroups = 0; // 0 = derive from the device's compute unit count
     int noCache = 0;
+    int verboseBuild = 0;
     cl_char8 startingSeed;
     for (int i = 0; i < 8; i++) {
         startingSeed.s[i] = '\0';
@@ -19,7 +20,7 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).");
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.");
             return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
@@ -66,6 +67,12 @@ int main(int argc, char **argv) {
             i++;
         }
         if (strcmp(argv[i],  "--no_cache")==0) {
+            noCache = 1;
+        }
+        if (strcmp(argv[i],  "--verbose_build")==0) {
+            // Print the compiler's build log even on success. On NVIDIA this
+            // includes ptxas register counts and spill stores. Forces a source build.
+            verboseBuild = 1;
             noCache = 1;
         }
         if (strcmp(argv[i],  "--list_devices")==0) {
@@ -140,7 +147,7 @@ int main(int argc, char **argv) {
 
     // Get CWD
     char executable_dir[MAX_PATH];
-    char include_path[MAX_PATH+6];
+    char include_path[MAX_PATH+32];
     char kernel_path[MAX_PATH+12];
     getExecutableDir(executable_dir);
     strcpy_s(kernel_path, sizeof kernel_path, executable_dir);
@@ -163,6 +170,9 @@ int main(int argc, char **argv) {
     strcpy_s(include_path, sizeof include_path, "-I \"");
     strcat_s(include_path, sizeof include_path, executable_dir);
     strcat_s(include_path, sizeof include_path, "\"");
+    if (verboseBuild) {
+        strcat_s(include_path, sizeof include_path, " -cl-nv-verbose");
+    }
     ssKernelCode = (char*)malloc(MAX_CODE_SIZE);
     ssKernelBuf = (char*)malloc(MAX_CODE_SIZE);
     // Set include information
@@ -296,7 +306,13 @@ build_program:
         err = clBuildProgram(ssKernelProgram, 1, &device, include_path, NULL, NULL);
         builtFromSource = 1;
     }
-    if (err == CL_BUILD_PROGRAM_FAILURE) { //print build log on error
+    if (verboseBuild && err == CL_INVALID_BUILD_OPTIONS) {
+        printf_s("This driver rejected -cl-nv-verbose (it is NVIDIA-only); rebuilding without it.\n");
+        char* opt = strstr(include_path, " -cl-nv-verbose");
+        if (opt) *opt = '\0';
+        err = clBuildProgram(ssKernelProgram, 1, &device, include_path, NULL, NULL);
+    }
+    if (err == CL_BUILD_PROGRAM_FAILURE || (verboseBuild && builtFromSource)) { //print build log on error, or always when asked
         size_t logLength = 0;
         err = clGetProgramBuildInfo(ssKernelProgram, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &logLength);
         if (err != CL_SUCCESS) {
