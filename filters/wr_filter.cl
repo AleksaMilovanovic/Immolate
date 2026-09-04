@@ -8,6 +8,7 @@
 // the previous one and the tallies are garbage: on 400 deep test seeds the
 // 64-node diet cola count differed from the true value on every single seed
 // (e.g. 9 vs 18, 0 vs 20, 201 vs 26). 512 covers the worst case observed.
+#define WR_PREFILTER_LEVEL 2
 #define CACHE_SIZE 512
 #include "lib/immolate.cl"
 
