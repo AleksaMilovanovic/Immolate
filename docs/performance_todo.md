@@ -1,5 +1,14 @@
 # Performance follow-ups (not implemented)
 
+Done first (2026-09-04): the RNG path no longer builds 260-byte `text` strings
+(node names are streamed into the hash), and `i_new` became the in-place
+`i_init` so the kernel frame holds one `instance` instead of two. On an RTX
+5080, wr_filter went from 24.7 s to 4.0 s over 500M seeds with identical
+output; `search` dropped from 255 registers / 51 KB frame / 8 KB spills to
+131 registers / 34 KB / 0 spills, and `random` is inlined again. With
+CACHE_SIZE 64 instead of 512 the same run is 3.4 s, so the 8.7 KB node cache
+now costs about 15%, not the 6x it appeared to before. Other filters unchanged.
+
 Analysis on 2026-09-03/04 identified these after the streaming node hash was
 done. All were host-verified exact where noted; none has been measured on a GPU.
 

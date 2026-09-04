@@ -8,7 +8,6 @@
 // the previous one and the tallies are garbage: on 400 deep test seeds the
 // 64-node diet cola count differed from the true value on every single seed
 // (e.g. 9 vs 18, 0 vs 20, 201 vs 26). 512 covers the worst case observed.
-#define WR_PREFILTER_LEVEL 2
 #define CACHE_SIZE 512
 #include "lib/immolate.cl"
 
@@ -106,6 +105,37 @@ bool wr_pack_has_soul(instance* inst, pack _pack, int ante) {
 // for a non-joker slot. next_shop_item also polled stickers and edition and
 // drew the tarot/planet for non-joker slots; those nodes are ante-specific and
 // antes 1-2 are never revisited, so skipping them changes nothing observable.
+// Joker identity plus edition for a shop slot, or RETRY for a non-joker slot.
+// Compared with next_shop_item this skips (a) the tarot/planet identity draw for
+// non-joker slots, and (b) the eternal/perishable sticker poll and the rental
+// poll inside next_joker_with_info. Each of those lives on its own RNG node
+// (Tarot/Planet + source + ante; etperpoll + ante; ssjr + ante) that nothing in
+// this filter ever reads, and the sticker/rental results can only be non-empty
+// at Black Stake or above while this filter runs at White Stake. Skipping them
+// therefore changes no value this filter observes. The draws that ARE kept
+// (card type, rarity, joker, edition) happen in the same order as before.
+item wr_shop_joker_edition(instance* inst, int ante, item* edition) {
+    shop shopInstance = get_shop_instance(inst);
+    double card_type = random(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2) * get_total_rate(shopInstance);
+    if (get_item_type(shopInstance, card_type) != ItemType_Joker) return RETRY;
+    item joker = next_joker(inst, S_Shop, ante);
+    *edition = next_joker_edition(inst, S_Shop, ante);
+    return joker;
+}
+// buffoon_pack_detailed without the sticker and rental polls (see above). Same
+// joker draws in the same order, same temporary locks between them, same
+// edition polls; only the polls this filter cannot observe are gone.
+void wr_buffoon_pack(item jokers[], item editions[], int size, instance* inst, int ante) {
+    for (int i = 0; i < size; i++) {
+        jokers[i] = next_joker(inst, S_Buffoon, ante);
+        editions[i] = next_joker_edition(inst, S_Buffoon, ante);
+        if (!inst->params.showman) i_lock(inst, jokers[i]); // temporary reroll for locked items
+    }
+    for (int i = 0; i < size; i++) {
+        i_unlock(inst, jokers[i]);
+    }
+}
+
 item wr_shop_joker(instance* inst, int ante) {
     shop shopInstance = get_shop_instance(inst);
     double card_type = random(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2) * get_total_rate(shopInstance);
@@ -139,8 +169,9 @@ bool wr_gate1(instance* inst) {
 // WR_PREFILTER_LEVEL 1: pack type only (one node, one draw, uniform across
 // lanes; passes 33% of seeds to pass 2). Level 2: all of gate 1 (passes
 // 0.07%, but lanes diverge on the soul polls and the Perkeo draw).
+// Measured on an RTX 5080 over 500M seeds: level 1 3.65 s, level 2 4.0 s.
 #ifndef WR_PREFILTER_LEVEL
-#define WR_PREFILTER_LEVEL 2
+#define WR_PREFILTER_LEVEL 1
 #endif
 bool prefilter(instance* inst) {
 #if WR_PREFILTER_LEVEL == 1
@@ -243,29 +274,30 @@ long wr_deep(instance* inst) {
         // Shop checks for diet colas and naturally negative copy jokers
         int shopItems = shopSizes[ante - 3];
         for (int i = 1; i <= shopItems; i++) {
-            shopitem shopItem = next_shop_item(inst, ante);
-            if (shopItem.type == ItemType_Joker) {
-                if (shopItem.value == Diet_Cola) {
-		    dietColaCount++;
-		    continue;
-		}
-                if (shopItem.joker.edition == Negative  && (shopItem.value == Brainstorm || shopItem.value == Blueprint)) negativeCopyJokerCount++;
+            item edition = No_Edition;
+            item joker = wr_shop_joker_edition(inst, ante, &edition);
+            if (joker == RETRY) continue;
+            if (joker == Diet_Cola) {
+                dietColaCount++;
+                continue;
             }
+            if (edition == Negative && (joker == Brainstorm || joker == Blueprint)) negativeCopyJokerCount++;
         }
 
         // Also check all packs for the previous
         for (int p = 1; p <= 6; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
-            jokerdata jokers[5];
+            item jokers[5];
+            item editions[5];
 
             if (_pack.type == Buffoon_Pack) {
-                buffoon_pack_detailed(jokers, _pack.size, inst, ante);
+                wr_buffoon_pack(jokers, editions, _pack.size, inst, ante);
                 for (int j = 0; j < _pack.size; j++) {
-                    if (jokers[j].joker == Diet_Cola) {
+                    if (jokers[j] == Diet_Cola) {
                         dietColaCount++;
-			continue;
+                        continue;
                     }
-                    if (jokers[j].edition == Negative && (jokers[j].joker == Brainstorm || jokers[j].joker == Blueprint)) {
+                    if (editions[j] == Negative && (jokers[j] == Brainstorm || jokers[j] == Blueprint)) {
                         negativeCopyJokerCount++;
                     }
                 }
