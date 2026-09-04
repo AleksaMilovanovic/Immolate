@@ -807,11 +807,22 @@ T_Playing_Card
 
 ## Macros
 Macros can be added to the top of a filter file to further customize its settings.
+### Two-Pass Search (prefilter)
+
+```cl
+#define HAS_PREFILTER
+bool prefilter(instance* inst) { ... }
+```
+
+Optional. When a filter defines these, Immolate runs two passes instead of one: pass 1 runs only `prefilter` on every seed and records the ranks of seeds for which it returned `true`; pass 2 runs the full `filter` on just those seeds, packed contiguously. `prefilter` must return `true` for every seed whose `filter` score could reach the cutoff (extra `true`s are harmless, a missed `true` loses that seed). `filter` still runs from a fresh instance, so it must repeat any work the prefilter did.
+
+Use this when the per-seed cost of `filter` varies by orders of magnitude, e.g. most seeds fail a cheap early check while a few run a long simulation. In a single pass every lane in a GPU warp waits for the slowest lane, so the rare expensive seeds dominate; the second pass groups the expensive seeds together. Keep `prefilter` itself cheap and uniform. `--single_pass` ignores the prefilter; `--batch` and `--progress` tune the pass-1 batch size and progress output. See `filters/wr_filter.cl` for an example.
+
 ### Fixed Filter Cutoff
 
 `#define FIXED_FILTER_CUTOFF`
 
-Instead of only printing out seeds generated with the highest score, running this filter will print out any seeds higher than the number specified with `-c`.
+No longer needed and has no effect. Immolate now always prints every seed whose score is at least the number specified with `-c`, instead of raising the cutoff to the best score seen so far during the run.
 
 ### Custom Game Versions
 ```cl

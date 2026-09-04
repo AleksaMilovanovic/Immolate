@@ -7,9 +7,9 @@ long filter(instance* inst) {
     if (next_tag(inst, 2) != Top_up_Tag) return passedFilters;
     passedFilters++;
     item jkrt1 = next_joker(inst, S_Top_Up, 2);
-    inst->locked[jkrt1] = true;
+    i_lock(inst, jkrt1);
     item jkrt2 = next_joker(inst, S_Top_Up, 2);
-    inst->locked[jkrt2] = true;
+    i_lock(inst, jkrt2);
     if (jkrt1 != Superposition && jkrt2 != Superposition) return passedFilters;
     passedFilters++;
     if (next_tarot(inst, S_Superposition, 2, false) != Judgement) return passedFilters;
@@ -18,7 +18,7 @@ long filter(instance* inst) {
     int hasFist = 0;
     for (int i = 0; i < 3; i++) {
         item jkr = next_joker(inst, S_Judgement, 2);
-        inst->locked[jkr] = true;
+        i_lock(inst, jkr);
         if (jkr == Bull) hasBull = 1;
         if (jkr == Green_Joker) hasGreen = 1;
         if (jkr == Raised_Fist) hasFist = 1;

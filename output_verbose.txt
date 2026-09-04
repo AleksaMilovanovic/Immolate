@@ -1,0 +1,109 @@
+# Prefilter Level 2 - '.\build\Release\Immolate.exe -f wr_filter -c 11 -s 11111111 -n 1000 --verbose_build'
+Immolate Beta v1.0.1f.1
+Warning: Kernel not found at C:\Users\aleks\Repos\Immolate-1\build\Release\search.cl, attempting working directory...
+Building program...
+(): Warning: Function search is a kernel, so overriding noinline attribute. The function may be inlined when called.
+(): Warning: Function search_prefilter is a kernel, so overriding noinline attribute. The function may be inlined when called.
+(): Warning: Function search_ranks is a kernel, so overriding noinline attribute. The function may be inlined when called.
+
+ptxas info    : 89 bytes gmem
+ptxas info    : Compiling entry function 'search_ranks' for 'sm_120a'
+ptxas info    : Function properties for search_ranks
+ptxas         .     53680 bytes stack frame, 8820 bytes spill stores, 9392 bytes spill loads
+ptxas info    : Used 255 registers, used 0 barriers
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Function properties for buffoon_pack
+ptxas         .     0 bytes stack frame, 1924 bytes spill stores, 1940 bytes spill loads
+ptxas info    : Function properties for buffoon_pack_detailed
+ptxas         .     0 bytes stack frame, 1756 bytes spill stores, 1796 bytes spill loads
+ptxas info    : Function properties for next_joker_with_info
+ptxas         .     0 bytes stack frame, 1072 bytes spill stores, 1164 bytes spill loads
+ptxas info    : Function properties for next_shop_item
+ptxas         .     0 bytes stack frame, 1028 bytes spill stores, 1032 bytes spill loads
+ptxas info    : Function properties for random
+ptxas         .     0 bytes stack frame, 7808 bytes spill stores, 7052 bytes spill loads
+ptxas info    : Function properties for wr_shop_joker
+ptxas         .     0 bytes stack frame, 1008 bytes spill stores, 1008 bytes spill loads
+ptxas info    : Compiling entry function 'search_prefilter' for 'sm_120a'
+ptxas info    : Function properties for search_prefilter
+ptxas         .     31600 bytes stack frame, 8076 bytes spill stores, 8080 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 12 bytes smem
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function 'search' for 'sm_120a'
+ptxas info    : Function properties for search
+ptxas         .     54448 bytes stack frame, 10032 bytes spill stores, 9784 bytes spill loads
+ptxas info    : Used 255 registers, used 0 barriers
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Function properties for buffoon_pack
+ptxas         .     0 bytes stack frame, 1924 bytes spill stores, 1940 bytes spill loads
+ptxas info    : Function properties for buffoon_pack_detailed
+ptxas         .     0 bytes stack frame, 1756 bytes spill stores, 1796 bytes spill loads
+ptxas info    : Function properties for next_joker_with_info
+ptxas         .     0 bytes stack frame, 1072 bytes spill stores, 1164 bytes spill loads
+ptxas info    : Function properties for next_shop_item
+ptxas         .     0 bytes stack frame, 1028 bytes spill stores, 1032 bytes spill loads
+ptxas info    : Function properties for random
+ptxas         .     0 bytes stack frame, 7796 bytes spill stores, 7040 bytes spill loads
+ptxas info    : Function properties for wr_shop_joker
+ptxas         .     0 bytes stack frame, 1008 bytes spill stores, 1008 bytes spill loads
+Launching 1344 work-groups of 32 work-items (43008 total).
+Starting searcher...
+Two-pass search: prefilter in batches of 67108864 seeds.
+Prefilter passed 1 of 1000 seeds.
+Done in 0.331000s
+
+
+
+# Prefilter Level 2 - '.\build\Release\Immolate.exe -f wr_filter -c 11 -s 11111111 -n 1000 --verbose_build'
+Immolate Beta v1.0.1f.1
+Warning: Kernel not found at C:\Users\aleks\Repos\Immolate-1\build\Release\search.cl, attempting working directory...
+Building program...
+(): Warning: Function search is a kernel, so overriding noinline attribute. The function may be inlined when called.
+(): Warning: Function search_prefilter is a kernel, so overriding noinline attribute. The function may be inlined when called.
+(): Warning: Function search_ranks is a kernel, so overriding noinline attribute. The function may be inlined when called.
+
+ptxas info    : 89 bytes gmem
+ptxas info    : Compiling entry function 'search_ranks' for 'sm_120a'
+ptxas info    : Function properties for search_ranks
+ptxas         .     53680 bytes stack frame, 8820 bytes spill stores, 9392 bytes spill loads
+ptxas info    : Used 255 registers, used 0 barriers
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Function properties for buffoon_pack
+ptxas         .     0 bytes stack frame, 1924 bytes spill stores, 1940 bytes spill loads
+ptxas info    : Function properties for buffoon_pack_detailed
+ptxas         .     0 bytes stack frame, 1756 bytes spill stores, 1796 bytes spill loads
+ptxas info    : Function properties for next_joker_with_info
+ptxas         .     0 bytes stack frame, 1072 bytes spill stores, 1164 bytes spill loads
+ptxas info    : Function properties for next_shop_item
+ptxas         .     0 bytes stack frame, 1028 bytes spill stores, 1032 bytes spill loads
+ptxas info    : Function properties for random
+ptxas         .     0 bytes stack frame, 7808 bytes spill stores, 7052 bytes spill loads
+ptxas info    : Function properties for wr_shop_joker
+ptxas         .     0 bytes stack frame, 1008 bytes spill stores, 1008 bytes spill loads
+ptxas info    : Compiling entry function 'search_prefilter' for 'sm_120a'
+ptxas info    : Function properties for search_prefilter
+ptxas         .     29424 bytes stack frame, 8076 bytes spill stores, 8080 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 12 bytes smem
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function 'search' for 'sm_120a'
+ptxas info    : Function properties for search
+ptxas         .     54448 bytes stack frame, 10032 bytes spill stores, 9784 bytes spill loads
+ptxas info    : Used 255 registers, used 0 barriers
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Function properties for buffoon_pack
+ptxas         .     0 bytes stack frame, 1924 bytes spill stores, 1940 bytes spill loads
+ptxas info    : Function properties for buffoon_pack_detailed
+ptxas         .     0 bytes stack frame, 1756 bytes spill stores, 1796 bytes spill loads
+ptxas info    : Function properties for next_joker_with_info
+ptxas         .     0 bytes stack frame, 1072 bytes spill stores, 1164 bytes spill loads
+ptxas info    : Function properties for next_shop_item
+ptxas         .     0 bytes stack frame, 1028 bytes spill stores, 1032 bytes spill loads
+ptxas info    : Function properties for random
+ptxas         .     0 bytes stack frame, 7796 bytes spill stores, 7040 bytes spill loads
+ptxas info    : Function properties for wr_shop_joker
+ptxas         .     0 bytes stack frame, 1008 bytes spill stores, 1008 bytes spill loads
+Launching 1344 work-groups of 32 work-items (43008 total).
+Starting searcher...
+Two-pass search: prefilter in batches of 67108864 seeds.
+Prefilter passed 320 of 1000 seeds.
+Done in 0.228000s

@@ -18,13 +18,13 @@ inline void set_text_length(text* t, int len) {
     t->str[t->len] = '\0';
 }
 
-text text_concat(text a, text b) {
-    text temp = a;
-    for (int j = 0; j < b.len; j++) {
-        temp.str[a.len+j] = b.str[j];
+// Appends b onto a in place. Replaces the old by-value text_concat, which
+// copied two 260-byte structs in and one out per call.
+void text_append(text* a, const text* b) {
+    for (int j = 0; j < b->len; j++) {
+        a->str[a->len+j] = b->str[j];
     }
-    set_text_length(&temp, temp.len+b.len);
-    return temp;
+    set_text_length(a, a->len+b->len);
 }
 
 void print_text(text x) {
@@ -38,14 +38,58 @@ double fract(double f) {
     return f-floor(f);
 }
 
-double pseudohash(text s) {
+// Correctly rounded a / b for b in (0, 1] without an fp64 divide. Same idea as
+// div_1e13 but the divisor varies, so the reciprocal is refined at run time:
+// start from the float reciprocal (~24 bits), two Newton steps take it past
+// 53 bits, then one Markstein residual step makes the quotient correctly
+// rounded. OpenCL guarantees correctly rounded fp64 `/` and fma(), so the
+// result is bit-identical to a / b. Verified on the host against `/` for 3e8
+// divisors and 4e7 full pseudohash strings, with the float seed perturbed by
+// up to +-4 ulp to cover approximate native reciprocals: zero mismatches.
+inline double div_pos(double a, double b) {
+    if (b < 1e-37) return a / b; // covers b == 0 (gives +inf like `/`) and tiny b where the float reciprocal would overflow
+    double r  = (double)(1.0f / (float)b);
+    double e0 = fma(-b, r, 1.0);
+    double y1 = fma(e0, r, r);
+    double e1 = e0 * e0;
+    double y2 = fma(e1, y1, y1);
+    double q  = a * y2;
+    double rr = fma(-b, q, a);
+    return fma(rr, y2, q);
+}
+
+// PH_SCALE replaces the original `(1<<k)` with k = 32. Shifting a 32-bit int
+// by 32 is undefined in C and OpenCL C; NVIDIA's compiler folds it to 1
+// (confirmed on an RTX 5080 via a probe kernel: 1<<32 == 1 and
+// hashedSeed("11111111") == 0.78390534373289711, matching the host at scale 1).
+// Every result this searcher has ever produced used that value, so it is
+// pinned here as a literal. The int_part/fract_part structure is kept exactly
+// because at scale 1 it is NOT equivalent to the plain one-line recurrence
+// (the long truncation changes results); only the shift expression changed.
+#define PH_SCALE 1
+// One character of the hash: `c` is the character value and `pos` its 1-based
+// position in the full string. pseudohash walks a string from its last
+// character to its first, so callers feed characters in that order with pos
+// counting down. Exactly the loop body of pseudohash() below.
+inline double ph_step(double num, int c, int pos) {
+    double q = div_pos(1.1239285023, num);
+    long int_part = (q*c*3.141592653589793116+3.141592653589793116*(pos))*PH_SCALE;
+    double fract_part = fract(fract((q*c*3.141592653589793116)*PH_SCALE)+fract((3.141592653589793116*(pos))*PH_SCALE));
+    return fract(((double)(int_part)+fract_part)/PH_SCALE);
+}
+// Kept for reference and for tests; the RNG path no longer builds strings.
+double pseudohash(const text* s) {
     double num = 1;
-    int k = 32; //determines size of left and right shifts...
-    for (int i = s.len - 1; i >= 0; i--) {
+    for (int i = s->len - 1; i >= 0; i--) {
+        // num starts at 1 and every later value is a fract() output in [0, 1).
+        // An exact 0 takes div_pos's fallback and yields +inf, same as before.
+        // This was a serially dependent fp64 divide per character, the most
+        // expensive instruction in the hash. Same value, no divide.
+        double q = div_pos(1.1239285023, num);
         // Floating point addition is weird, so we have to make it have more room for error
-        long int_part = (1.1239285023/num*s.str[i]*3.141592653589793116+3.141592653589793116*(i+1))*(1<<k);
-        double fract_part = fract(fract((1.1239285023/num*s.str[i]*3.141592653589793116)*(1<<k))+fract((3.141592653589793116*(i+1))*(1<<k)));
-        num = fract(((double)(int_part)+fract_part)/(1<<k));
+        long int_part = (q*s->str[i]*3.141592653589793116+3.141592653589793116*(i+1))*PH_SCALE;
+        double fract_part = fract(fract((q*s->str[i]*3.141592653589793116)*PH_SCALE)+fract((3.141592653589793116*(i+1))*PH_SCALE));
+        num = fract(((double)(int_part)+fract_part)/PH_SCALE);
         // What the original function would look like:
         //num = fract(1.1239285023/num*s.str[i]*3.141592653589793116+3.141592653589793116*(i+1));
     }
@@ -55,11 +99,10 @@ double pseudohash(text s) {
 double pseudohash8(char8 s) {
     //resizeString(&s, 16, ' ');
     double num = 1;
-    int k = 32;
     for (int i = 7; i >= 0; i--) {
-        long int_part = (1.1239285023/num*s[i]*3.141592653589793116+3.141592653589793116*(i+1))*(1<<k);
-        double fract_part = fract(fract((1.1239285023/num*s[i]*3.141592653589793116)*(1<<k))+fract((3.141592653589793116*(i+1))*(1<<k)));
-        num = fract(((double)(int_part)+fract_part)/(1<<k));
+        long int_part = (1.1239285023/num*s[i]*3.141592653589793116+3.141592653589793116*(i+1))*PH_SCALE;
+        double fract_part = fract(fract((1.1239285023/num*s[i]*3.141592653589793116)*PH_SCALE)+fract((3.141592653589793116*(i+1))*PH_SCALE));
+        num = fract(((double)(int_part)+fract_part)/PH_SCALE);
     }
     return num;
 }
@@ -71,7 +114,29 @@ unsigned int lsh32(unsigned int x, size_t l) {
 unsigned int rsh32(unsigned int x, size_t r) {
     return x>>r;
 }
+// Correctly rounded n / 1e13 without an fp64 divide. Consumer GPUs run fp64
+// at 1/32-1/64 rate and have no hardware fp64 divide, so `/` expands to a long
+// software sequence; this is one multiply and two fused multiply-adds.
+// Markstein: if r is the correctly rounded reciprocal of b, then
+//   q = fl(n*r); e = fma(-q, b, n); q' = fma(e, r, q)
+// is the correctly rounded quotient n/b. OpenCL requires fp64 `/` and fma() to
+// be correctly rounded, so q' is bit-identical to n/1e13. A plain n*r is NOT
+// (it differs in ~20% of cases); the residual step is what makes it exact.
+// Verified on the host against `/` for 1.28e9 integer n in [0, 1e13].
+inline double div_1e13(double n) {
+    const double b = 1e13;
+    const double r = 1.0 / 1e13; // compile-time constant, correctly rounded
+    double q = n * r;
+    double e = fma(-q, b, n);
+    return fma(e, r, q);
+}
 double roundDigits(double f, int d) {
+    // Every caller passes d = 13; 10^13 is exactly representable. Balatro's
+    // pseudoseed rounds its state to 13 digits, so this step must stay
+    // bit-faithful; only the way the division is computed changed.
+    if (d == 13) {
+        return div_1e13(round(f * 1e13));
+    }
     double power = pow((double)10, d);
     return round(f*power)/power;
 }
