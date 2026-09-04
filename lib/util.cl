@@ -67,6 +67,17 @@ inline double div_pos(double a, double b) {
 // because at scale 1 it is NOT equivalent to the plain one-line recurrence
 // (the long truncation changes results); only the shift expression changed.
 #define PH_SCALE 1
+// One character of the hash: `c` is the character value and `pos` its 1-based
+// position in the full string. pseudohash walks a string from its last
+// character to its first, so callers feed characters in that order with pos
+// counting down. Exactly the loop body of pseudohash() below.
+inline double ph_step(double num, int c, int pos) {
+    double q = div_pos(1.1239285023, num);
+    long int_part = (q*c*3.141592653589793116+3.141592653589793116*(pos))*PH_SCALE;
+    double fract_part = fract(fract((q*c*3.141592653589793116)*PH_SCALE)+fract((3.141592653589793116*(pos))*PH_SCALE));
+    return fract(((double)(int_part)+fract_part)/PH_SCALE);
+}
+// Kept for reference and for tests; the RNG path no longer builds strings.
 double pseudohash(const text* s) {
     double num = 1;
     for (int i = s->len - 1; i >= 0; i--) {

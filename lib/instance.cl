@@ -40,8 +40,7 @@ instance i_new(seed s) {
     // fully written by init_node/get_node_child first, so they need no init.
     instance inst;
     inst.seed = s;
-    text seed_str = s_to_string(&s);
-    inst.hashedSeed = pseudohash(&seed_str);
+    inst.hashedSeed = pseudohash_seed(&s);
     inst.rngCache.generatedFirstPack = false;
     inst.rngCache.reportedOverflow = false;
     inst.rngCache.nextFreeNode = 0;
@@ -82,14 +81,24 @@ double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
     }
     if (node_id == -1) {
         node_id = init_node(&(inst->rngCache), key);
-        text phvalue = node_str(nts[0],ids[0]);
-        for (int i = 1; i < num; i++) {
-            text part = node_str(nts[i],ids[i]);
-            text_append(&phvalue, &part);
+        // pseudohash(name_0 + ... + name_{num-1} + seed), streamed. The hash
+        // consumes the string from its last character to its first, so the
+        // seed goes in first, then the components in reverse, with `pos`
+        // tracking the character's position in the full string. Bit-identical
+        // to concatenating and hashing; no string is ever built.
+        int total = inst->seed.len;
+        for (int i = 0; i < num; i++) {
+            total += node_part_len(nts[i], ids[i]);
         }
-        text seed_str = s_to_string(&inst->seed);
-        text_append(&phvalue, &seed_str);
-        inst->rngCache.nodes[node_id].rngState = pseudohash(&phvalue);
+        int pos = total;
+        double h = 1;
+        for (int i = inst->seed.len - 1; i >= 0; i--) {
+            h = ph_step(h, s_char_at(&inst->seed, i), pos--);
+        }
+        for (int i = num - 1; i >= 0; i--) {
+            h = ph_node_part_rev(h, &pos, nts[i], ids[i]);
+        }
+        inst->rngCache.nodes[node_id].rngState = h;
     }
     inst->rngCache.nodes[node_id].rngState = roundDigits(fract(inst->rngCache.nodes[node_id].rngState*1.72431234+2.134453429141),13);
     return (inst->rngCache.nodes[node_id].rngState + inst->hashedSeed)/2;

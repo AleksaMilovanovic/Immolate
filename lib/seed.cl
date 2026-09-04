@@ -73,6 +73,14 @@ seed s_from_rank(long rank) {
     }
     return s;
 }
+// pseudohash of the seed string alone, streamed: no 260-byte text on the stack.
+double pseudohash_seed(seed* s) {
+    double num = 1;
+    for (int i = s->len - 1; i >= 0; i--) {
+        num = ph_step(num, s_char_at(s, i), i + 1);
+    }
+    return num;
+}
 text s_to_string(seed* s) {
     text str;
     for (int i = 0; i < s->len; i++) {

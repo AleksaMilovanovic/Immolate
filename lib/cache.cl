@@ -77,88 +77,133 @@ typedef enum NodeType {
     N_Resample
 } ntype;
 
-// String values for each node
-text type_str(int x) {
+// Node-name components. Each is a pointer into __constant memory plus a
+// length; the RNG path streams the characters straight into the hash and never
+// builds a string. (Earlier versions returned a 260-byte `text` by value from
+// each of these, and get_node_child held four of them: 1,040 bytes of stack
+// per inlined call site, which drove the kernel to 255 registers and forced
+// random() out of line on NVIDIA.)
+__constant char* type_cstr(int x, int* len) {
     switch(x) {
-        case R_Joker_Common:             return init_text("Joker1", 6);
-        case R_Joker_Uncommon:           return init_text("Joker2", 6);
-        case R_Joker_Rare:               return init_text("Joker3", 6);
-        case R_Joker_Legendary:          return init_text("Joker4", 6);
-        case R_Joker_Rarity:             return init_text("rarity", 6);
-        case R_Joker_Edition:            return init_text("edi", 3);
-        case R_Misprint:                 return init_text("misprint", 8);
-        case R_Standard_Has_Enhancement: return init_text("stdset", 6);
-        case R_Enhancement:              return init_text("Enhanced", 8);
-        case R_Card:                     return init_text("front", 5);
-        case R_Standard_Edition:         return init_text("standard_edition", 16);
-        case R_Standard_Has_Seal:        return init_text("stdseal", 7);
-        case R_Standard_Seal:            return init_text("stdsealtype", 11);
-        case R_Shop_Pack:                return init_text("shop_pack", 9);
-        case R_Tarot:                    return init_text("Tarot", 5);
-        case R_Spectral:                 return init_text("Spectral", 8);
-        case R_Tags:                     return init_text("Tag", 3);
-        case R_Shuffle_New_Round:        return init_text("nr", 2);
-        case R_Card_Type:                return init_text("cdt", 3);
-        case R_Planet:                   return init_text("Planet", 6);
-        case R_Lucky_Mult:               return init_text("lucky_mult", 10);
-        case R_Lucky_Money:              return init_text("lucky_money", 11);
-        case R_Sigil:                    return init_text("sigil", 5);
-        case R_Ouija:                    return init_text("ouija", 5);
-        case R_Wheel_of_Fortune:         return init_text("wheel_of_fortune", 16);
-        case R_Gros_Michel:              return init_text("gros_michel", 11);
-        case R_Cavendish:                return init_text("cavendish", 9);
-        case R_Voucher:                  return init_text("Voucher", 7);
-        case R_Voucher_Tag:              return init_text("Voucher_fromtag", 15);
-        case R_Orbital_Tag:              return init_text("orbital", 7);
-        case R_Soul:                     return init_text("soul_", 5);
-        case R_Erratic:                  return init_text("erratic", 7);
-        case R_Eternal:                  return init_text("stake_shop_joker_eternal", 24);
-        case R_Perishable:               return init_text("ssjp", 4);
-        case R_Rental:                   return init_text("ssjr", 4);
-        case R_Eternal_Perishable:       return init_text("etperpoll", 9);
-        case R_Rental_Pack:              return init_text("packssjr", 8);
-        case R_Eternal_Perishable_Pack:  return init_text("packetper", 9);
-        case R_Boss:                     return init_text("boss", 4);
-        default:                         return init_text("", 0);
+        case R_Joker_Common:             *len = 6;  return "Joker1";
+        case R_Joker_Uncommon:           *len = 6;  return "Joker2";
+        case R_Joker_Rare:               *len = 6;  return "Joker3";
+        case R_Joker_Legendary:          *len = 6;  return "Joker4";
+        case R_Joker_Rarity:             *len = 6;  return "rarity";
+        case R_Joker_Edition:            *len = 3;  return "edi";
+        case R_Misprint:                 *len = 8;  return "misprint";
+        case R_Standard_Has_Enhancement: *len = 6;  return "stdset";
+        case R_Enhancement:              *len = 8;  return "Enhanced";
+        case R_Card:                     *len = 5;  return "front";
+        case R_Standard_Edition:         *len = 16; return "standard_edition";
+        case R_Standard_Has_Seal:        *len = 7;  return "stdseal";
+        case R_Standard_Seal:            *len = 11; return "stdsealtype";
+        case R_Shop_Pack:                *len = 9;  return "shop_pack";
+        case R_Tarot:                    *len = 5;  return "Tarot";
+        case R_Spectral:                 *len = 8;  return "Spectral";
+        case R_Tags:                     *len = 3;  return "Tag";
+        case R_Shuffle_New_Round:        *len = 2;  return "nr";
+        case R_Card_Type:                *len = 3;  return "cdt";
+        case R_Planet:                   *len = 6;  return "Planet";
+        case R_Lucky_Mult:               *len = 10; return "lucky_mult";
+        case R_Lucky_Money:              *len = 11; return "lucky_money";
+        case R_Sigil:                    *len = 5;  return "sigil";
+        case R_Ouija:                    *len = 5;  return "ouija";
+        case R_Wheel_of_Fortune:         *len = 16; return "wheel_of_fortune";
+        case R_Gros_Michel:              *len = 11; return "gros_michel";
+        case R_Cavendish:                *len = 9;  return "cavendish";
+        case R_Voucher:                  *len = 7;  return "Voucher";
+        case R_Voucher_Tag:              *len = 15; return "Voucher_fromtag";
+        case R_Orbital_Tag:              *len = 7;  return "orbital";
+        case R_Soul:                     *len = 5;  return "soul_";
+        case R_Erratic:                  *len = 7;  return "erratic";
+        case R_Eternal:                  *len = 24; return "stake_shop_joker_eternal";
+        case R_Perishable:               *len = 4;  return "ssjp";
+        case R_Rental:                   *len = 4;  return "ssjr";
+        case R_Eternal_Perishable:       *len = 9;  return "etperpoll";
+        case R_Rental_Pack:              *len = 8;  return "packssjr";
+        case R_Eternal_Perishable_Pack:  *len = 9;  return "packetper";
+        case R_Boss:                     *len = 4;  return "boss";
+        default:                         *len = 0;  return "";
     }
 }
-text source_str(int x) {
+__constant char* source_cstr(int x, int* len) {
     switch(x) {
-        case S_Shop:           return init_text("sho", 3);
-        case S_Emperor:        return init_text("emp", 3);
-        case S_High_Priestess: return init_text("pri", 3);
-        case S_Judgement:      return init_text("jud", 3);
-        case S_Wraith:         return init_text("wra", 3);
-        case S_Arcana:         return init_text("ar1", 3);
-        case S_Celestial:      return init_text("pl1", 3);
-        case S_Spectral:       return init_text("spe", 3);
-        case S_Standard:       return init_text("sta", 3);
-        case S_Buffoon:        return init_text("buf", 3);
-        case S_Vagabond:       return init_text("vag", 3);
-        case S_Superposition:  return init_text("sup", 3);
-        case S_8_Ball:         return init_text("8ba", 3);
-        case S_Seance:         return init_text("sea", 3);
-        case S_Sixth_Sense:    return init_text("sixth", 5);
-        case S_Top_Up:         return init_text("top", 3);
-        case S_Rare_Tag:       return init_text("rta", 3);
-        case S_Uncommon_Tag:   return init_text("uta", 3);
-        case S_Blue_Seal:      return init_text("blusl", 5);
-        case S_Purple_Seal:    return init_text("8ba", 3);
-        case S_Soul:           return init_text("sou", 3);
-        case S_Riff_Raff:      return init_text("rif", 3);
-        case S_Cartomancer:      return init_text("car", 3);
-        default:               return init_text("", 0);
+        case S_Shop:           *len = 3; return "sho";
+        case S_Emperor:        *len = 3; return "emp";
+        case S_High_Priestess: *len = 3; return "pri";
+        case S_Judgement:      *len = 3; return "jud";
+        case S_Wraith:         *len = 3; return "wra";
+        case S_Arcana:         *len = 3; return "ar1";
+        case S_Celestial:      *len = 3; return "pl1";
+        case S_Spectral:       *len = 3; return "spe";
+        case S_Standard:       *len = 3; return "sta";
+        case S_Buffoon:        *len = 3; return "buf";
+        case S_Vagabond:       *len = 3; return "vag";
+        case S_Superposition:  *len = 3; return "sup";
+        case S_8_Ball:         *len = 3; return "8ba";
+        case S_Seance:         *len = 3; return "sea";
+        case S_Sixth_Sense:    *len = 5; return "sixth";
+        case S_Top_Up:         *len = 3; return "top";
+        case S_Rare_Tag:       *len = 3; return "rta";
+        case S_Uncommon_Tag:   *len = 3; return "uta";
+        case S_Blue_Seal:      *len = 5; return "blusl";
+        case S_Purple_Seal:    *len = 3; return "8ba";
+        case S_Soul:           *len = 3; return "sou";
+        case S_Riff_Raff:      *len = 3; return "rif";
+        case S_Cartomancer:    *len = 3; return "car";
+        default:               *len = 0; return "";
     }
 }
-text resample_str(int x) {
-    if (x == 0) {
-        return init_text("", 0);
-    } else {
-        text str1 = init_text("_resample", 9);
-        text str2 = int_to_str(x+1);
-        text_append(&str1, &str2);
-        return str1;
+// Decimal digit count, matching int_to_str's length rule (0 -> 1 digit).
+inline int dec_len(int x) {
+    int digits = 1;
+    while (x / 10 > 0) {
+        digits++;
+        x /= 10;
     }
+    return digits;
+}
+// Length in characters of one node-name component.
+int node_part_len(ntype nt, int x) {
+    int len = 0;
+    switch (nt) {
+        case N_Type:     type_cstr(x, &len); return len;
+        case N_Source:   source_cstr(x, &len); return len;
+        case N_Ante:     return dec_len(x);
+        case N_Resample: return x == 0 ? 0 : 9 + dec_len(x + 1);
+    }
+    return 0;
+}
+// Feed the decimal digits of x into the hash, last digit first, decrementing
+// *pos per character. Emits exactly the characters int_to_str would.
+inline double ph_decimal_rev(double h, int* pos, int x) {
+    do {
+        h = ph_step(h, '0' + x % 10, (*pos)--);
+        x /= 10;
+    } while (x > 0);
+    return h;
+}
+inline double ph_cstr_rev(double h, int* pos, __constant char* s, int len) {
+    for (int i = len - 1; i >= 0; i--) {
+        h = ph_step(h, s[i], (*pos)--);
+    }
+    return h;
+}
+// Feed one node-name component into the hash, last character first.
+double ph_node_part_rev(double h, int* pos, ntype nt, int x) {
+    int len;
+    switch (nt) {
+        case N_Type:   return ph_cstr_rev(h, pos, type_cstr(x, &len), len);
+        case N_Source: return ph_cstr_rev(h, pos, source_cstr(x, &len), len);
+        case N_Ante:   return ph_decimal_rev(h, pos, x);
+        case N_Resample:
+            if (x == 0) return h;
+            // "_resample" followed by (x+1): the digits come first when reversed.
+            h = ph_decimal_rev(h, pos, x + 1);
+            return ph_cstr_rev(h, pos, "_resample", 9);
+    }
+    return h;
 }
 
 #ifndef CACHE_SIZE
@@ -195,14 +240,6 @@ typedef struct Cache {
     int nextFreeNode;
 } cache;
 
-text node_str(ntype nt, int x) {
-    switch (nt) {
-        case N_Type: return type_str(x);
-        case N_Source: return source_str(x);
-        case N_Ante: return int_to_str(x);
-        case N_Resample: return resample_str(x);
-    }
-}
 int init_node(cache* c, ulong key) {
     if (c->nextFreeNode >= CACHE_SIZE) {
         // Previously this wrote past nodes[] silently. Warn once per work-item
