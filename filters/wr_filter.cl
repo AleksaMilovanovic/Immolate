@@ -151,11 +151,14 @@ bool prefilter(instance* inst) {
 #endif
 }
 
-long filter(instance* inst) {
-    if (!wr_gate1(inst)) {
-        return 0;
-    }
-
+// Everything after gate 1, kept out of line on purpose. Inlined into filter()
+// this loop pushed the whole kernel to 255 registers with ~20 KB of spill
+// traffic per seed and made the compiler emit random() as an out-of-line
+// function that spills 7.8 KB on every draw, so gate 1 (which runs on every
+// seed) paid for code that runs on 0.07% of seeds. As a separate function the
+// hot path compiles small; the call cost lands only on the seeds that need it.
+__attribute__((noinline))
+long wr_deep(instance* inst) {
     bool foundBrainstorm = false;
     bool foundBlueprint = false;
 
@@ -272,4 +275,12 @@ long filter(instance* inst) {
     // CC12DDD
     // [2NegCop][1NegTag][1NegTag2][3Diet]
     return dietColaCount + (secondNegativeTagCount * 1000) + (firstNegativeTagCount * 10000) + (negativeCopyJokerCount * 1000000);
+}
+
+long filter(instance* inst) {
+    if (!wr_gate1(inst)) {
+        return 0;
+    }
+
+    return wr_deep(inst);
 }
