@@ -302,7 +302,7 @@ int main(int argc, char **argv) {
                 if (ssKernelProgram != NULL) clReleaseProgram(ssKernelProgram);
                 ssKernelProgram = NULL;
             } else {
-                printf_s("Loaded compiled kernel from cache.\n");
+                printf_s("Loaded compiled kernel from cache (sources hashed under %s%slib and %s%sfilters).\n", executable_dir, PATH_SEPARATOR, executable_dir, PATH_SEPARATOR);
                 loadedFromCache = 1;
             }
             free(bin);

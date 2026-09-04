@@ -7,7 +7,8 @@ __kernel void search(long start_rank, long num_seeds, long filter_cutoff) {
     long stride = get_global_size(0);
     seed _seed = s_from_rank(start_rank + i);
     for (; i < num_seeds; i += stride) {
-        instance inst = i_new(_seed);
+        instance inst;
+        i_init(&inst, _seed);
         long score = filter(&inst);
         // The cutoff is the value given with -c and never changes during a run.
         if (score >= filter_cutoff) {
@@ -47,7 +48,8 @@ __kernel void search_prefilter(long start_rank, long num_seeds, __global long* s
         int n = 0;
         for (int k = 0; k < PREFILTER_CHUNK; k++) {
             if (i < num_seeds) {
-                instance inst = i_new(_seed);
+                instance inst;
+                i_init(&inst, _seed);
                 if (prefilter(&inst)) mine[n++] = start_rank + i;
                 s_skip(&_seed, gsize);
                 i += gsize;
@@ -66,7 +68,8 @@ __kernel void search_prefilter(long start_rank, long num_seeds, __global long* s
 __kernel void search_ranks(__global const long* ranks, long num_ranks, long filter_cutoff) {
     for (long i = get_global_id(0); i < num_ranks; i += get_global_size(0)) {
         seed _seed = s_from_rank(ranks[i]);
-        instance inst = i_new(_seed);
+        instance inst;
+        i_init(&inst, _seed);
         long score = filter(&inst);
         if (score >= filter_cutoff) {
             text s_str = s_to_string(&_seed);

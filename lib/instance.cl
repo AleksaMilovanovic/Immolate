@@ -33,38 +33,40 @@ inline void i_lock(instance* inst, item i) {
 inline void i_unlock(instance* inst, item i) {
     inst->locked[(int)i >> 6] &= ~(1UL << ((int)i & 63));
 }
-instance i_new(seed s) {
+// Initialize *inst in place. The previous by-value `instance i_new(seed)`
+// made the compiler hold two copies of the struct in the kernel's frame; with
+// CACHE_SIZE 512 that is ~8.7 KB each, enough on its own to pin the kernel at
+// 255 registers and spill regardless of how small the code is.
+void i_init(instance* inst, seed s) {
     // Deliberately no aggregate initializer: `instance inst = {...}` zero-fills
     // the entire ~4 KB struct every seed, most of which is the RNG node cache.
     // Cache nodes are only ever read at indices below nextFreeNode and are
     // fully written by init_node/get_node_child first, so they need no init.
-    instance inst;
-    inst.seed = s;
-    inst.hashedSeed = pseudohash_seed(&s);
-    inst.rngCache.generatedFirstPack = false;
-    inst.rngCache.reportedOverflow = false;
-    inst.rngCache.nextFreeNode = 0;
+    inst->seed = s;
+    inst->hashedSeed = pseudohash_seed(&s);
+    inst->rngCache.generatedFirstPack = false;
+    inst->rngCache.reportedOverflow = false;
+    inst->rngCache.nextFreeNode = 0;
     // rng is only consumed after a seeded call, but keep the old zeroed state
     // for any filter that reads it first.
-    inst.rng.state = (ulong4)(0, 0, 0, 0);
-    inst.rng.out.ul = 0;
+    inst->rng.state = (ulong4)(0, 0, 0, 0);
+    inst->rng.out.ul = 0;
     // Old initializer was {.locked = {true}}: only locked[0] (RETRY) is true.
     for (int i = 0; i < LOCKED_WORDS; i++) {
-        inst.locked[i] = 0UL;
+        inst->locked[i] = 0UL;
     }
-    i_lock(&inst, RETRY);
-    inst.params.deck = Red_Deck;
-    inst.params.stake = White_Stake;
-    inst.params.showman = false;
+    i_lock(inst, RETRY);
+    inst->params.deck = Red_Deck;
+    inst->params.stake = White_Stake;
+    inst->params.showman = false;
     for (int i = 0; i < 32; i++) {
-        inst.params.vouchers[i] = false;
+        inst->params.vouchers[i] = false;
     }
     for (int i = 0; i < 52; i++) {
-        inst.params.deckCards[i] = RETRY;
+        inst->params.deckCards[i] = RETRY;
     }
-    inst.params.deckSize = 52;
-    inst.params.handSize = 8;
-    return inst;
+    inst->params.deckSize = 52;
+    inst->params.handSize = 8;
 }
 double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
     double temp = 0; // will store value set to node, which has some post-processing at the end

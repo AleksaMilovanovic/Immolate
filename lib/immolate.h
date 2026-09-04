@@ -75,7 +75,11 @@ unsigned char* read_whole_file(const char* path, size_t* outLen) {
 cl_ulong fnv1a_file(cl_ulong h, const char* path, int* ok) {
     size_t n = 0;
     unsigned char* buf = read_whole_file(path, &n);
-    if (!buf) { *ok = 0; return h; }
+    if (!buf) {
+        if (*ok) printf_s("Kernel cache disabled: cannot read %s\n", path);
+        *ok = 0;
+        return h;
+    }
     h = fnv1a_str(h, path);
     h = fnv1a_buf(h, buf, n);
     free(buf);
