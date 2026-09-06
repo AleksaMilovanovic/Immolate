@@ -7,6 +7,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 	- It's also recommended to customize the filter itself to your needs. (deck, stake, maximum ante to search, number of cards per ante)
 - **Bad Seeds:** Seeds with very little rare or uncommon jokers in Antes 1-4.
 	- This filter was designed to generate seeds that are difficult to beat, but it doesn't do a good job at that.
+- **Brainstorm Blueprint:** Brainstorm and Blueprint both obtainable from the shops and Buffoon Packs of antes 1-2 (`-c 2`; `-c 1` for either). Draws only what it needs: rarity polls, and a joker's identity only when the poll says Rare.
 - **Buggy Erratic:** Searches for seeds with glitched erratic decks. These seeds would generate a deck with only 10s of Spades if playing with Erratic Deck.
 - **Buggy Seeds**: Searches for glitched seeds. These seeds would freeze the game when trying to use them.
 - **Cavendish:** Searches for a seed where Cavendish can be obtained after Round 2. Both it and Gros Michel may appear in the shop or in a buffoon pack. Gros Michel must be bought after Round 1, and it will go extinct immediately.
@@ -25,6 +26,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Four Deadly Jokers:** Searches for a first shop buffoon pack with the four jokers that give increased mult to suits.
 - **High Score Demo:** Searches for a seed with a good setup for high score world record runs.
 	- Because this filter was written during Balatro's demo, its search criteria is far from optimal for the current world record strategy.
+- **Immolate Sixth Sense:** Immolate among the first two spectral cards Sixth Sense would create in each of antes 1-3. Score is the number of Immolates; six RNG draws per seed.
 - **Legendary Skip:** Searches for a seed where a Legendary Joker is obtainable through a tag in Ante 1.
 - **Longest Joker Name:** Searches for seeds with a Polychrome Perishable Rental Delayed Gratification in the first shop.
 	- Requires Gold Stake.
@@ -34,7 +36,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Most Jokers:** Finds seeds with Perkeo, Ankh and Ectoplasm as consumables from shop. Used for most jokers WR (with eternal jokers).
 	- Requires Ghost Deck.
 	- Score output displays the pack number containing Perkeo, the ante containing Ankh, and then the ante containing Ectoplasm.
-- **Negative Tags:** Score is the number of Negative Tags offered as skip tags in antes 1 to 8 (two per ante), with the game's ante-1 tag locks applied. Change `NT_MAX_ANTE` in the filter to look further. Intended to run over a seed-supplier pool with `--from`.
+- **Negative Tags:** Score is the number of Negative Tags offered as skip tags in antes 1 to 38 (two per ante), with the game's ante-1 tag locks applied. Change `NT_MAX_ANTE` in the filter to look further. Intended to run over a seed-supplier pool with `--from`.
 - **Orbital Test:** A filter to test the capability of searching Orbital Tag output, which is currently WIP.
 - **Perkeo Analyzer:** Prints all consumable generator queues of a seed (Seals, Judgement, Wraith, etc.)
 	- The name has nothing to do with the joker Perkeo.

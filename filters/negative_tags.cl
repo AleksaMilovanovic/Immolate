@@ -1,5 +1,5 @@
 // Counts Negative Tags. Score = number of Negative Tags among the two skip tags
-// of every ante from 1 to NT_MAX_ANTE, so `-c 3` prints seeds with at least
+// of every ante from 1 to NT_MAX_ANTE (38 by default), so `-c 3` prints seeds with at least
 // three. Both tags of each ante are counted even though a run can only take one
 // per ante; the score is "how many are on offer", which is what a supplier
 // pool wants to sort by.
@@ -14,7 +14,7 @@
 #include "lib/immolate.cl"
 
 #ifndef NT_MAX_ANTE
-#define NT_MAX_ANTE 8
+#define NT_MAX_ANTE 38
 #endif
 
 long filter(instance* inst) {
