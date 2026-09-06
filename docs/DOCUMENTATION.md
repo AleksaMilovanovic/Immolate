@@ -818,6 +818,22 @@ Optional. When a filter defines these, Immolate runs two passes instead of one: 
 
 Use this when the per-seed cost of `filter` varies by orders of magnitude, e.g. most seeds fail a cheap early check while a few run a long simulation. In a single pass every lane in a GPU warp waits for the slowest lane, so the rare expensive seeds dominate; the second pass groups the expensive seeds together. Keep `prefilter` itself cheap and uniform. `--single_pass` ignores the prefilter; `--batch` and `--progress` tune the pass-1 batch size and progress output. See `filters/wr_filter.cl` for an example.
 
+### Seed-Supplier Files (--to / --from)
+
+Most searches reject the vast majority of seeds on a cheap early check, and many different filters share the same early check (for example "The Soul appears in the first two antes"). A seed-supplier file stores the seeds that passed such a check so later searches can skip the rest of the pool.
+
+```
+immolate -f early_ante_perkeo -c 1 -n 100000000000 --to soul.seeds
+immolate -f early_ante_perkeo -c 2 --from soul.seeds --to perkeo.seeds
+immolate -f my_filter -c 5 --from perkeo.seeds
+```
+
+`--to <file>` writes the rank of every seed whose `filter` score is at least the `-c` cutoff to `file` instead of printing it. It works with any filter, single-pass or two-pass; with a prefilter, pass 2 does the writing. `--from <file>` reads the seeds from such a file, in chunks of `--batch`, and runs the full `filter` on them; `-n` caps how many seeds are read and `-s` is ignored. A filter's prefilter is skipped under `--from`, because the file is already a list of seeds. `--from` and `--to` combine, so pools can be narrowed in stages; each stage costs a pass over the previous pool only.
+
+Seeds are stored as ranks (see `s_from_rank` in `lib/seed.cl`), sorted ascending and delta-coded as LEB128 varints, so a pool that keeps a few percent of seeds costs about one byte per seed: a Soul pool over 100 billion seeds is about 4 GB, a Perkeo pool about 1 GB. The 116-byte header records the filter name, cutoff, range and count; the format is documented in `lib/supplier.h`. Because the walk is in ascending rank order the file is globally sorted, and searches over it print seeds in ascending order too.
+
+A filter run over a pool starts from a fresh instance like any other, so it must reproduce whatever RNG draws the supplier filter made to find its feature; the pool only says which seeds are worth the work. Keep the supplier filter's pack order and ante range in mind when writing the consumer (or call the same helper, such as `pack_has_soul`).
+
 ### Fixed Filter Cutoff
 
 `#define FIXED_FILTER_CUTOFF`

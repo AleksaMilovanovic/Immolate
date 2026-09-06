@@ -179,6 +179,49 @@ item next_spectral(instance* inst, rsrc itemSource, int ante, bool soulable) {
 }
 #endif
 
+// Exact emulation of the soul polls inside arcana_pack / spectral_pack, without
+// generating the tarot/spectral cards. RNG state is per node: the soul polls
+// live on node soul_<Tarot|Spectral><ante>, the card draws on a different node,
+// and the pack unlocks everything it drew before returning. So whether a Soul
+// appears depends only on the soul node's draw sequence, reproduced here draw
+// for draw, including the rule that a forced The_Soul / Black_Hole is locked
+// and stops its own poll for the rest of the pack. Returns true if any card in
+// the pack would be The_Soul. Only meaningful for Arcana and Spectral packs
+// (returns false for the others). Callers that also need the cards must use
+// arcana_pack / spectral_pack instead; the two must not be mixed on one pack.
+#if V_AT_MOST(1,0,0,10)
+    #define SOUL_POLL(inst, rt, ante) random(inst, (__private ntype[]){N_Type, N_Type}, (__private int[]){R_Soul, rt}, 2)
+#else
+    #define SOUL_POLL(inst, rt, ante) random(inst, (__private ntype[]){N_Type, N_Type, N_Ante}, (__private int[]){R_Soul, rt, ante}, 3)
+#endif
+bool pack_has_soul(instance* inst, pack _pack, int ante) {
+    bool soulLocked = i_locked(inst, The_Soul);
+    bool bhLocked = i_locked(inst, Black_Hole);
+    bool showman = inst->params.showman;
+    if (_pack.type == Arcana_Pack) {
+        for (int i = 0; i < _pack.size; i++) {
+            if ((showman || !soulLocked) && SOUL_POLL(inst, R_Tarot, ante) > 0.997) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (_pack.type != Spectral_Pack) return false;
+    // Spectral pack: two polls per card, Black Hole's result overrides the Soul's.
+    for (int i = 0; i < _pack.size; i++) {
+        item forced = RETRY;
+        if ((showman || !soulLocked) && SOUL_POLL(inst, R_Spectral, ante) > 0.997) {
+            forced = The_Soul;
+        }
+        if ((showman || !bhLocked) && SOUL_POLL(inst, R_Spectral, ante) > 0.997) {
+            forced = Black_Hole;
+        }
+        if (forced == The_Soul) return true;
+        if (forced == Black_Hole && !showman) bhLocked = true;
+    }
+    return false;
+}
+
 // Get rarity of the next joker for the given source type. 
 // Affects the random, unless source S_Soul is requested.
 rarity next_joker_rarity(instance* inst, rsrc itemSource, int ante) {
@@ -623,7 +666,10 @@ void init_erratic_deck(instance* inst) {
         }
     }
 }
-#ifdef __NV_CL_C_VERSION
+// Compilers with the generic address space (NVIDIA, and any CL 2.0+/3.0 C
+// compiler such as pocl) reject a __private parameter for a struct member
+// pointer, so declare the parameter generic there.
+#if defined(__NV_CL_C_VERSION) || defined(__opencl_c_generic_address_space) || (__OPENCL_C_VERSION__ >= 200)
 void copy_cards(__generic item to[], __constant item from[]) {
 #else
 void copy_cards(item to[], __constant item from[]) {

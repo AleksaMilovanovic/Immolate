@@ -11,6 +11,8 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Buggy Seeds**: Searches for glitched seeds. These seeds would freeze the game when trying to use them.
 - **Cavendish:** Searches for a seed where Cavendish can be obtained after Round 2. Both it and Gros Michel may appear in the shop or in a buffoon pack. Gros Michel must be bought after Round 1, and it will go extinct immediately.
 - **Double Legendary:** Searches for a seed with two legendary jokers in Ante 1. Every Arcana or Spectral Pack in the shop must be opened.
+- **Early Ante Perkeo:** Seed-supplier filter: The Soul (score 1) or Perkeo from The Soul (score 2) in any Arcana/Spectral pack of the first two antes.
+	- Run once with `--to` to build a pool (`-c 1` keeps ~4% of seeds, `-c 2` ~0.8%), then search that pool with `--from` instead of walking every seed. See the comments in the filter and the Seed-Supplier Files section of the documentation.
 - **Emperor Fool:** Searches for Emperor-Fool Chains.
 	- Score output is the length of the chain, with the last digit being the ante that The Emperor must be used in to start the chain.
 - **Erratic Flush Five:** Searches for an Erratic Deck seed with lots of an exact card.
@@ -32,6 +34,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Most Jokers:** Finds seeds with Perkeo, Ankh and Ectoplasm as consumables from shop. Used for most jokers WR (with eternal jokers).
 	- Requires Ghost Deck.
 	- Score output displays the pack number containing Perkeo, the ante containing Ankh, and then the ante containing Ectoplasm.
+- **Negative Tags:** Score is the number of Negative Tags offered as skip tags in antes 1 to 8 (two per ante), with the game's ante-1 tag locks applied. Change `NT_MAX_ANTE` in the filter to look further. Intended to run over a seed-supplier pool with `--from`.
 - **Orbital Test:** A filter to test the capability of searching Orbital Tag output, which is currently WIP.
 - **Perkeo Analyzer:** Prints all consumable generator queues of a seed (Seals, Judgement, Wraith, etc.)
 	- The name has nothing to do with the joker Perkeo.
