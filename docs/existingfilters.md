@@ -11,6 +11,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Buggy Erratic:** Searches for seeds with glitched erratic decks. These seeds would generate a deck with only 10s of Spades if playing with Erratic Deck.
 - **Buggy Seeds**: Searches for glitched seeds. These seeds would freeze the game when trying to use them.
 - **Cavendish:** Searches for a seed where Cavendish can be obtained after Round 2. Both it and Gros Michel may appear in the shop or in a buffoon pack. Gros Michel must be bought after Round 1, and it will go extinct immediately.
+- **Deep Negative Shops:** Scans every shop and Buffoon Pack of antes 3-38 (30 to 231 reroll frames per ante, frame size growing with Overstock / Overstock Plus or with ante) and counts negative copy jokers, negative uncommons, other negatives plus Diet Colas, and first- and second-slot Negative Tags. Score is five 3-digit fields in that order. Run it over a pool with `--from`; at ~11,000 cards per seed it is far too slow for a raw walk.
 - **Double Legendary:** Searches for a seed with two legendary jokers in Ante 1. Every Arcana or Spectral Pack in the shop must be opened.
 - **Early Ante Perkeo:** Seed-supplier filter: The Soul (score 1) or Perkeo from The Soul (score 2) in any Arcana/Spectral pack of the first two antes.
 	- Run once with `--to` to build a pool (`-c 1` keeps ~4% of seeds, `-c 2` ~0.8%), then search that pool with `--from` instead of walking every seed. See the comments in the filter and the Seed-Supplier Files section of the documentation.
@@ -26,7 +27,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Four Deadly Jokers:** Searches for a first shop buffoon pack with the four jokers that give increased mult to suits.
 - **High Score Demo:** Searches for a seed with a good setup for high score world record runs.
 	- Because this filter was written during Balatro's demo, its search criteria is far from optimal for the current world record strategy.
-- **Immolate Sixth Sense:** Immolate among the first two spectral cards Sixth Sense would create in each of antes 1-3. Score is the number of Immolates; six RNG draws per seed.
+- **Immolate Sixth Sense:** Sixth Sense obtainable from a shop or Buffoon Pack in antes 1-3, and Immolate among the first two spectral cards it creates from that ante on. Score is the number of Immolates. Checks the creations first (two draws per ante) and only then scans shops, drawing a joker's identity only when its rarity poll says Uncommon.
 - **Legendary Skip:** Searches for a seed where a Legendary Joker is obtainable through a tag in Ante 1.
 - **Longest Joker Name:** Searches for seeds with a Polychrome Perishable Rental Delayed Gratification in the first shop.
 	- Requires Gold Stake.
