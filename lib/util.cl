@@ -224,8 +224,10 @@ lrandom randomseed(double d) {
         ulong u;
         uint m = 1 << (r&255);
         r >>= 8;
-        // Doing these two operations separately fixes the code for some reason...
-        // Probably another roundoff issue...
+        // Two separate roundings, as LuaJIT does. A compiler that fuses these
+        // into one fma() gives a different seed state; FP_CONTRACT is OFF for
+        // this reason (lib/immolate.cl), and the statements are kept apart so
+        // the intent is visible.
         d = d*3.14159265358979323846;
         d = d+2.7182818284590452354;
         lr.out.d = d;

@@ -1,5 +1,14 @@
 // Based on C++ program by 00001H and MathIsFun_
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
+// Balatro runs on LuaJIT, which does plain IEEE fp64 with no fused multiply-add.
+// The pseudohash and randomseed chains are bit-sensitive, so any contraction
+// changes which items a seed produces. NVIDIA's compiler fuses by default:
+// on an RTX 5080 it turned randomseed's `d*pi; d+e` into one fma, and seed
+// LP4K3AAQ then drew different shop cards than the game (verified in-game on
+// seeds 123I and 11FC against the unfused values). Contraction stays off for
+// every kernel source; the explicit fma() calls in util.cl are unaffected,
+// they are deliberate and exact.
+#pragma OPENCL FP_CONTRACT OFF
 #ifndef GAME_VERSION
     #define VER1 1
     #define VER2 0
