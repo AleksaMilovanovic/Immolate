@@ -16,10 +16,41 @@
 //  * Sixth Sense is Uncommon, so a joker's identity is drawn only when its
 //    rarity poll says Uncommon; Common/Rare identities, editions, stickers and
 //    non-joker shop cards live on nodes nothing here reads, and the temporary
-//    in-pack locks they would set only affect their own rarity pool.
+//    in-pack locks they would set (and the locked Common/Rare jokers below)
+//    only affect their own rarity pool.
+//  * Joker locks: see the LOCKED / UNLOCKED lists below the include.
 //  * The shop scan stops at the first Sixth Sense, and never runs past the
 //    last ante with an Immolate.
 #include "lib/immolate.cl"
+
+// ---------------------------------------------------------------------------
+// Joker locks. A locked joker cannot appear: when the game rolls one it
+// rerolls within the same rarity, which shifts every later draw from that
+// rarity pool. The LOCKED lists are the jokers a fresh Balatro profile has not
+// yet unlocked (from init_locks in lib/instance.cl, split by rarity). Anything
+// in an UNLOCKED list is removed from the locks again; add jokers there as
+// your profile earns them. Sixth Sense itself is available on a fresh profile,
+// so the UNLOCKED lists start empty. An empty list is {}.
+// Only Uncommon identities are drawn here, so the common and rare lists have
+// no effect on the result; they are kept so the shop filters share one layout.
+// ---------------------------------------------------------------------------
+__constant item SS_LOCKED_COMMONS[] = {
+    Golden_Ticket, Swashbuckler, Hanging_Chad, Shoot_the_Moon
+};
+__constant item SS_LOCKED_UNCOMMONS[] = {
+    Mr_Bones, Acrobat, Sock_and_Buskin, Troubadour, Certificate, Smeared_Joker, Throwback,
+    Rough_Gem, Bloodstone, Arrowhead, Onyx_Agate, Glass_Joker, Showman, Flower_Pot, Merry_Andy,
+    Oops_All_6s, The_Idol, Seeing_Double, Matador, Satellite, Cartomancer, Astronomer, Bootstraps
+};
+__constant item SS_LOCKED_RARES[] = {
+    Blueprint, Wee_Joker, Hit_the_Road, The_Duo, The_Trio, The_Family, The_Order, The_Tribe,
+    Stuntman, Invisible_Joker, Brainstorm, Drivers_License, Burnt_Joker
+};
+__constant item SS_UNLOCKED_COMMONS[] = {};
+__constant item SS_UNLOCKED_UNCOMMONS[] = {};
+__constant item SS_UNLOCKED_RARES[] = {};
+
+#define SS_APPLY_LOCKS(list, fn) for (int _i = 0; _i < (int)(sizeof(list) / sizeof(item)); _i++) fn(inst, list[_i]);
 
 #ifndef SS_TRIGGERS
 #define SS_TRIGGERS 2
@@ -74,6 +105,12 @@ bool ss_ante_has_sixth_sense(instance* inst, int ante, shop shopInstance, double
 }
 
 long filter(instance* inst) {
+    SS_APPLY_LOCKS(SS_LOCKED_COMMONS, i_lock)
+    SS_APPLY_LOCKS(SS_LOCKED_UNCOMMONS, i_lock)
+    SS_APPLY_LOCKS(SS_LOCKED_RARES, i_lock)
+    SS_APPLY_LOCKS(SS_UNLOCKED_COMMONS, i_unlock)
+    SS_APPLY_LOCKS(SS_UNLOCKED_UNCOMMONS, i_unlock)
+    SS_APPLY_LOCKS(SS_UNLOCKED_RARES, i_unlock)
     // Immolates among the first SS_TRIGGERS creations of each ante.
     int immolates[SS_MAX_ANTE + 1];
     int lastAnteWithImmolate = 0;

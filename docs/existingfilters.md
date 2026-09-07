@@ -7,7 +7,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 	- It's also recommended to customize the filter itself to your needs. (deck, stake, maximum ante to search, number of cards per ante)
 - **Bad Seeds:** Seeds with very little rare or uncommon jokers in Antes 1-4.
 	- This filter was designed to generate seeds that are difficult to beat, but it doesn't do a good job at that.
-- **Brainstorm Blueprint:** Brainstorm and Blueprint both obtainable from the shops and Buffoon Packs of antes 1-2 (`-c 2`; `-c 1` for either). Draws only what it needs: rarity polls, and a joker's identity only when the poll says Rare.
+- **Brainstorm Blueprint:** Brainstorm and Blueprint both obtainable from the shops and Buffoon Packs of antes 1-2 (`-c 2`; `-c 1` for either). Draws only what it needs: rarity polls, and a joker's identity only when the poll says Rare. Carries the same fresh-profile joker lock lists as Deep Negative Shops; the other locked rares reroll as in the game, and Brainstorm and Blueprint are unlocked by default since the filter needs them.
 - **Buggy Erratic:** Searches for seeds with glitched erratic decks. These seeds would generate a deck with only 10s of Spades if playing with Erratic Deck.
 - **Buggy Seeds**: Searches for glitched seeds. These seeds would freeze the game when trying to use them.
 - **Cavendish:** Searches for a seed where Cavendish can be obtained after Round 2. Both it and Gros Michel may appear in the shop or in a buffoon pack. Gros Michel must be bought after Round 1, and it will go extinct immediately.
@@ -28,7 +28,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Four Deadly Jokers:** Searches for a first shop buffoon pack with the four jokers that give increased mult to suits.
 - **High Score Demo:** Searches for a seed with a good setup for high score world record runs.
 	- Because this filter was written during Balatro's demo, its search criteria is far from optimal for the current world record strategy.
-- **Immolate Sixth Sense:** Sixth Sense obtainable from a shop or Buffoon Pack in antes 1-3, and Immolate among the first two spectral cards it creates from that ante on. Score is the number of Immolates. Checks the creations first (two draws per ante) and only then scans shops, drawing a joker's identity only when its rarity poll says Uncommon.
+- **Immolate Sixth Sense:** Sixth Sense obtainable from a shop or Buffoon Pack in antes 1-3, and Immolate among the first two spectral cards it creates from that ante on. Score is the number of Immolates. Checks the creations first (two draws per ante) and only then scans shops, drawing a joker's identity only when its rarity poll says Uncommon. Carries the same fresh-profile joker lock lists as Deep Negative Shops, so locked uncommons reroll as in the game.
 - **Legendary Skip:** Searches for a seed where a Legendary Joker is obtainable through a tag in Ante 1.
 - **Longest Joker Name:** Searches for seeds with a Polychrome Perishable Rental Delayed Gratification in the first shop.
 	- Requires Gold Stake.

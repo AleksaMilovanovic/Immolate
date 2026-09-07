@@ -11,9 +11,41 @@
 // stickers and the tarot/planet for non-joker shop slots all live on RNG nodes
 // nothing here reads, and the temporary in-pack locks they would set can only
 // affect draws from their own rarity pool, so skipping them changes no value
-// this filter observes. Per seed that is ~14 card-type polls, ~10 rarity
+// this filter observes. Locked Common/Uncommon jokers likewise only reroll
+// within their own pool, which is never drawn here. Per seed that is ~14 card-type polls, ~10 rarity
 // polls, 9 pack polls and a rare-identity draw for about one slot in twenty.
 #include "lib/immolate.cl"
+
+// ---------------------------------------------------------------------------
+// Joker locks. A locked joker cannot appear: when the game rolls one it
+// rerolls within the same rarity, which shifts every later draw from that
+// rarity pool. The LOCKED lists are the jokers a fresh Balatro profile has not
+// yet unlocked (from init_locks in lib/instance.cl, split by rarity). Anything
+// in an UNLOCKED list is removed from the locks again. Brainstorm and
+// Blueprint are both fresh-profile locks, so BB_UNLOCKED_RARES defaults to
+// the two of them: with either locked the filter could never score. Add more
+// jokers there as your profile earns them. An empty list is {}.
+// Only Rare identities are drawn here, so the common and uncommon lists have
+// no effect on the result; they are kept so the three deep/shop filters share
+// one layout and can be edited the same way.
+// ---------------------------------------------------------------------------
+__constant item BB_LOCKED_COMMONS[] = {
+    Golden_Ticket, Swashbuckler, Hanging_Chad, Shoot_the_Moon
+};
+__constant item BB_LOCKED_UNCOMMONS[] = {
+    Mr_Bones, Acrobat, Sock_and_Buskin, Troubadour, Certificate, Smeared_Joker, Throwback,
+    Rough_Gem, Bloodstone, Arrowhead, Onyx_Agate, Glass_Joker, Showman, Flower_Pot, Merry_Andy,
+    Oops_All_6s, The_Idol, Seeing_Double, Matador, Satellite, Cartomancer, Astronomer, Bootstraps
+};
+__constant item BB_LOCKED_RARES[] = {
+    Blueprint, Wee_Joker, Hit_the_Road, The_Duo, The_Trio, The_Family, The_Order, The_Tribe,
+    Stuntman, Invisible_Joker, Brainstorm, Drivers_License, Burnt_Joker
+};
+__constant item BB_UNLOCKED_COMMONS[] = {};
+__constant item BB_UNLOCKED_UNCOMMONS[] = {};
+__constant item BB_UNLOCKED_RARES[] = { Brainstorm, Blueprint };
+
+#define BB_APPLY_LOCKS(list, fn) for (int _i = 0; _i < (int)(sizeof(list) / sizeof(item)); _i++) fn(inst, list[_i]);
 
 #ifndef BB_SHOP_ANTE1
 #define BB_SHOP_ANTE1 4
@@ -36,6 +68,12 @@ inline item bb_rare_joker(instance* inst, rsrc src, int ante) {
 }
 
 long filter(instance* inst) {
+    BB_APPLY_LOCKS(BB_LOCKED_COMMONS, i_lock)
+    BB_APPLY_LOCKS(BB_LOCKED_UNCOMMONS, i_lock)
+    BB_APPLY_LOCKS(BB_LOCKED_RARES, i_lock)
+    BB_APPLY_LOCKS(BB_UNLOCKED_COMMONS, i_unlock)
+    BB_APPLY_LOCKS(BB_UNLOCKED_UNCOMMONS, i_unlock)
+    BB_APPLY_LOCKS(BB_UNLOCKED_RARES, i_unlock)
     bool brainstorm = false, blueprint = false;
     shop shopInstance = get_shop_instance(inst);
     double totalRate = get_total_rate(shopInstance);
