@@ -11,14 +11,25 @@
 // Locks follow the game: Negative Tag (and several others) cannot appear in
 // ante 1, so init_locks is applied for ante 1 and init_unlocks per ante after
 // that. Without them a rerolled ante-1 tag would land on the wrong item.
+//
+// NT_LOCKED_TAGS lists tags treated as never available, as if not yet
+// unlocked on the profile: when the game rolls one it rerolls, which shifts
+// every later tag draw, so a profile that has not unlocked Foil, Holographic
+// and Polychrome Tags sees different Negative Tags than a completed one.
+// Edit the list to match your profile; leave it empty ({}) for everything
+// unlocked. Note init_unlocks(ante 2) re-enables Negative Tag; the list below
+// is re-applied every ante so it is never undone by that.
 #include "lib/immolate.cl"
 
 #ifndef NT_MAX_ANTE
 #define NT_MAX_ANTE 38
 #endif
+__constant item NT_LOCKED_TAGS[] = { Foil_Tag, Holographic_Tag, Polychrome_Tag };
+#define NT_NUM_LOCKED_TAGS (sizeof(NT_LOCKED_TAGS) / sizeof(NT_LOCKED_TAGS[0]))
 
 long filter(instance* inst) {
     init_locks(inst, 1, false, false);
+    for (int i = 0; i < (int)NT_NUM_LOCKED_TAGS; i++) i_lock(inst, NT_LOCKED_TAGS[i]);
     long negativeTags = 0;
     for (int ante = 1; ante <= NT_MAX_ANTE; ante++) {
         init_unlocks(inst, ante, false);
