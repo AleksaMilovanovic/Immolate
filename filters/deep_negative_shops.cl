@@ -23,6 +23,7 @@
 //     Uncommon rarity              -> uncommon
 //     anything else                -> other
 // Tags: for antes 3-38, first-slot and second-slot Negative Tags counted apart.
+// Joker locks: see the LOCKED / UNLOCKED lists below the include.
 //
 // Score, five 3-digit fields high to low:
 //   copy | uncommon | other | first-tag negatives | second-tag negatives
@@ -34,8 +35,40 @@
 // own nodes and cannot fire at White Stake. Every joker's rarity, identity and
 // edition is drawn: Diet Cola is Uncommon, copy jokers are Rare, and the
 // identity streams are shared across the ante, so none can be skipped.
-#define CACHE_SIZE 1024
+// 1024 nodes overflowed on ~2% of pool seeds once the joker locks were added:
+// every locked joker that comes up costs a resample node per rarity, ante and
+// reroll depth. 2048 covers every seed seen in a 3000-seed sample with room.
+#define CACHE_SIZE 2048
 #include "lib/immolate.cl"
+
+// ---------------------------------------------------------------------------
+// Joker locks. A locked joker cannot appear: when the game rolls one it
+// rerolls within the same rarity, which shifts every later draw from that
+// rarity pool. The LOCKED lists below are the jokers a fresh Balatro profile
+// has not yet unlocked (taken from init_locks in lib/instance.cl, split by
+// rarity). Anything in an UNLOCKED list is removed from the locks again, so to
+// search as a profile that has earned Blueprint, add Blueprint to
+// DNS_UNLOCKED_RARES and leave the LOCKED lists alone. An empty list is {}.
+// Rerolls are exact: randchoice_common resamples on its own node sequence,
+// the same way the game does.
+// ---------------------------------------------------------------------------
+__constant item DNS_LOCKED_COMMONS[] = {
+    Golden_Ticket, Swashbuckler, Hanging_Chad, Shoot_the_Moon
+};
+__constant item DNS_LOCKED_UNCOMMONS[] = {
+    Mr_Bones, Acrobat, Sock_and_Buskin, Troubadour, Certificate, Smeared_Joker, Throwback,
+    Rough_Gem, Bloodstone, Arrowhead, Onyx_Agate, Glass_Joker, Showman, Flower_Pot, Merry_Andy,
+    Oops_All_6s, The_Idol, Seeing_Double, Matador, Satellite, Cartomancer, Astronomer, Bootstraps
+};
+__constant item DNS_LOCKED_RARES[] = {
+    Blueprint, Wee_Joker, Hit_the_Road, The_Duo, The_Trio, The_Family, The_Order, The_Tribe,
+    Stuntman, Invisible_Joker, Brainstorm, Drivers_License, Burnt_Joker
+};
+__constant item DNS_UNLOCKED_COMMONS[] = {};
+__constant item DNS_UNLOCKED_UNCOMMONS[] = {};
+__constant item DNS_UNLOCKED_RARES[] = {};
+
+#define DNS_APPLY_LOCKS(list, fn) for (int _i = 0; _i < (int)(sizeof(list) / sizeof(item)); _i++) fn(inst, list[_i]);
 
 #ifndef DNS_FIRST_ANTE
 #define DNS_FIRST_ANTE 3
@@ -86,6 +119,12 @@ inline void dns_joker(instance* inst, rsrc src, int ante, dns_counts* c, item* d
 
 long filter(instance* inst) {
     for (int i = 0; i < (int)(sizeof(DNS_UPGRADE_VOUCHERS) / sizeof(item)); i++) i_lock(inst, DNS_UPGRADE_VOUCHERS[i]);
+    DNS_APPLY_LOCKS(DNS_LOCKED_COMMONS, i_lock)
+    DNS_APPLY_LOCKS(DNS_LOCKED_UNCOMMONS, i_lock)
+    DNS_APPLY_LOCKS(DNS_LOCKED_RARES, i_lock)
+    DNS_APPLY_LOCKS(DNS_UNLOCKED_COMMONS, i_unlock)
+    DNS_APPLY_LOCKS(DNS_UNLOCKED_UNCOMMONS, i_unlock)
+    DNS_APPLY_LOCKS(DNS_UNLOCKED_RARES, i_unlock)
     shop shopInstance = get_shop_instance(inst);
     double totalRate = get_total_rate(shopInstance);
     bool overstock = false, overstockPlus = false;
