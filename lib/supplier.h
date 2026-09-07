@@ -12,7 +12,8 @@
 //       80     8  i64 cutoff the seeds were collected at
 //       88     8  i64 start rank of the range that was walked
 //       96     8  i64 number of seeds in that range
-//      104     4  u32 reserved (0)
+//      104     4  u32 flags: bit 0 set once the file was closed cleanly;
+//                 bit 1 set if the seeds were drawn from another supplier file (--from)
 //      108     8  u64 count of ranks in the body (written when the file closes)
 //      116        body
 //
@@ -43,7 +44,10 @@
 #define SUP_VERSION 1u
 #define SUP_ENC_DELTA_VARINT 1u
 #define SUP_HEADER_SIZE 116
+#define SUP_FLAGS_OFFSET 104
 #define SUP_COUNT_OFFSET 108
+#define SUP_FLAG_CLOSED 1u
+#define SUP_FLAG_FROM_FILE 2u
 
 typedef struct SupplierHeader {
     uint32_t version;
@@ -52,6 +56,7 @@ typedef struct SupplierHeader {
     int64_t cutoff;
     int64_t start_rank;
     int64_t num_seeds;
+    uint32_t flags;
     uint64_t count;
 } sup_header;
 
@@ -69,7 +74,7 @@ static void sup_encode_header(unsigned char out[SUP_HEADER_SIZE], const sup_head
     sup_put_u64(out + 80, (uint64_t)h->cutoff);
     sup_put_u64(out + 88, (uint64_t)h->start_rank);
     sup_put_u64(out + 96, (uint64_t)h->num_seeds);
-    sup_put_u32(out + 104, 0);
+    sup_put_u32(out + 104, h->flags);
     sup_put_u64(out + 108, h->count);
 }
 // Returns 0 on success, or a message describing why the header is invalid.
@@ -82,6 +87,7 @@ static const char* sup_decode_header(const unsigned char in[SUP_HEADER_SIZE], su
     h->cutoff = (int64_t)sup_get_u64(in + 80);
     h->start_rank = (int64_t)sup_get_u64(in + 88);
     h->num_seeds = (int64_t)sup_get_u64(in + 96);
+    h->flags = sup_get_u32(in + 104);
     h->count = sup_get_u64(in + 108);
     if (h->version != SUP_VERSION) return "unsupported seed-supplier file version";
     if (h->encoding != SUP_ENC_DELTA_VARINT) return "unsupported seed-supplier encoding";
@@ -91,6 +97,7 @@ static const char* sup_decode_header(const unsigned char in[SUP_HEADER_SIZE], su
 // ---------------------------------------------------------------- writer ----
 typedef struct SupplierWriter {
     FILE* f;
+    uint32_t flags;        // header flags other than CLOSED, preserved on close
     int64_t prev;          // last rank written; deltas are taken from it
     uint64_t count;
     unsigned char* enc;    // scratch for one batch's encoded bytes
@@ -104,14 +111,16 @@ static int sup_cmp_long(const void* a, const void* b) {
 
 // Opens `path` for writing and emits a header with count 0; the true count is
 // patched in by sup_writer_close. Returns 0 on failure.
-static int sup_writer_open(sup_writer* w, const char* path, const char* filter, int64_t cutoff, int64_t start_rank, int64_t num_seeds) {
+static int sup_writer_open(sup_writer* w, const char* path, const char* filter, int64_t cutoff, int64_t start_rank, int64_t num_seeds, uint32_t flags) {
     memset(w, 0, sizeof *w);
     w->f = fopen(path, "wb");
     if (!w->f) return 0;
+    w->flags = flags & ~SUP_FLAG_CLOSED;
     sup_header h;
     memset(&h, 0, sizeof h);
     h.version = SUP_VERSION;
     h.encoding = SUP_ENC_DELTA_VARINT;
+    h.flags = w->flags;
     strncpy(h.filter, filter, 63);
     h.cutoff = cutoff;
     h.start_rank = start_rank;
@@ -159,15 +168,81 @@ static int sup_writer_append(sup_writer* w, int64_t* ranks, size_t n) {
 static int sup_writer_close(sup_writer* w) {
     int ok = 1;
     if (w->f) {
-        unsigned char c[8];
-        sup_put_u64(c, w->count);
-        if (sup_fseek64(w->f, SUP_COUNT_OFFSET, SEEK_SET) != 0 || fwrite(c, 1, 8, w->f) != 8) ok = 0;
+        unsigned char c[12];
+        sup_put_u32(c, w->flags | SUP_FLAG_CLOSED);
+        sup_put_u64(c + 4, w->count);
+        if (sup_fseek64(w->f, SUP_FLAGS_OFFSET, SEEK_SET) != 0 || fwrite(c, 1, 12, w->f) != 12) ok = 0;
         if (fclose(w->f) != 0) ok = 0;
         w->f = NULL;
     }
     free(w->enc);
     w->enc = NULL;
     return ok;
+}
+
+#ifdef _WIN32
+    #include <io.h>
+    #define sup_truncate(f, len) _chsize_s(_fileno(f), (long long)(len))
+#else
+    #include <unistd.h>
+    #define sup_truncate(f, len) ftruncate(fileno(f), (off_t)(len))
+#endif
+
+// Reopens an existing supplier file for appending, for --resume. Reads the
+// header into *h, scans the body to find the last complete rank (a killed
+// process can leave a partial varint at the end; it is cut off) and positions
+// the writer after it. *complete is set if the file was closed cleanly, in
+// which case nothing should be appended. *last_rank is the last rank in the
+// body, or -1 if it is empty. Returns 0 with a message on failure.
+static const char* sup_writer_reopen(sup_writer* w, const char* path, sup_header* h, int64_t* last_rank, int* complete) {
+    memset(w, 0, sizeof *w);
+    w->f = fopen(path, "r+b");
+    if (!w->f) return "cannot open file for update";
+    unsigned char buf[SUP_HEADER_SIZE];
+    if (fread(buf, 1, SUP_HEADER_SIZE, w->f) != SUP_HEADER_SIZE) { fclose(w->f); w->f = NULL; return "file too short for a header"; }
+    const char* err = sup_decode_header(buf, h);
+    if (err) { fclose(w->f); w->f = NULL; return err; }
+    w->flags = h->flags & ~SUP_FLAG_CLOSED;
+    *complete = (h->flags & SUP_FLAG_CLOSED) || h->count > 0;
+    // Scan the body varint by varint.
+    int64_t prev = -1;
+    uint64_t count = 0;
+    int64_t good_end = SUP_HEADER_SIZE; // byte offset just after the last complete varint
+    int64_t pos = SUP_HEADER_SIZE;
+    uint64_t d = 0;
+    int shift = 0;
+    unsigned char rb[1 << 16];
+    size_t n;
+    while ((n = fread(rb, 1, sizeof rb, w->f)) > 0) {
+        for (size_t i = 0; i < n; i++) {
+            unsigned char b = rb[i];
+            pos++;
+            d |= (uint64_t)(b & 0x7f) << shift;
+            shift += 7;
+            if (!(b & 0x80)) {
+                prev += (int64_t)d;
+                count++;
+                good_end = pos;
+                d = 0;
+                shift = 0;
+            } else if (shift >= 64) {
+                fclose(w->f); w->f = NULL; return "corrupt varint in body";
+            }
+        }
+    }
+    if (pos != good_end) {
+        fprintf(stderr, "Dropping %lld trailing bytes of an incomplete record from %s.\n", (long long)(pos - good_end), path);
+        if (sup_truncate(w->f, good_end) != 0) { fclose(w->f); w->f = NULL; return "cannot truncate partial record"; }
+    }
+    if (*complete && h->count != count) {
+        fprintf(stderr, "%s says %llu ranks but holds %llu; treating it as incomplete.\n", path, (unsigned long long)h->count, (unsigned long long)count);
+        *complete = 0;
+    }
+    if (sup_fseek64(w->f, good_end, SEEK_SET) != 0) { fclose(w->f); w->f = NULL; return "cannot seek"; }
+    w->prev = prev;
+    w->count = count;
+    *last_rank = count ? prev : -1;
+    return NULL;
 }
 
 // ---------------------------------------------------------------- reader ----
@@ -180,6 +255,8 @@ typedef struct SupplierReader {
     unsigned char* buf;
     size_t buf_len, buf_pos;
     int eof;
+    int has_pending;       // one rank held back by sup_reader_skip_through
+    int64_t pending;
 } sup_reader;
 
 // Opens and validates `path`. On failure returns a message and leaves r unusable.
@@ -212,6 +289,10 @@ static int sup_reader_byte(sup_reader* r) {
 // ignored; a truncated body ends early with a warning.
 static size_t sup_reader_next(sup_reader* r, int64_t* out, size_t max) {
     size_t n = 0;
+    if (max > 0 && r->has_pending) {
+        out[n++] = r->pending;
+        r->has_pending = 0;
+    }
     while (n < max && r->consumed < r->header.count) {
         uint64_t d = 0;
         int shift = 0, b;
@@ -230,6 +311,23 @@ static size_t sup_reader_next(sup_reader* r, int64_t* out, size_t max) {
         r->consumed++;
     }
     return n;
+}
+
+// Skips every rank <= last_rank (the file is sorted). Returns how many were
+// skipped. The first rank above last_rank is held back and returned by the next
+// sup_reader_next call.
+static uint64_t sup_reader_skip_through(sup_reader* r, int64_t last_rank) {
+    uint64_t skipped = 0;
+    int64_t v;
+    while (sup_reader_next(r, &v, 1) == 1) {
+        if (v > last_rank) {
+            r->has_pending = 1;
+            r->pending = v;
+            break;
+        }
+        skipped++;
+    }
+    return skipped;
 }
 
 static void sup_reader_close(sup_reader* r) {
