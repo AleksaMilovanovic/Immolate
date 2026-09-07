@@ -839,6 +839,12 @@ immolate -f wr_filter -c 1 --to_parts 24 --to perkeo_full.seeds        (dies dur
 immolate --resume perkeo_full.seeds.part12of24                          (finishes parts 12-24)
 ```
 
+`--from` also accepts the base name of a `--to_parts` run: `--from perkeo_full.seeds` reads every finished `perkeo_full.seeds.part*of*` in part order and skips any part that is still being written or was interrupted (with a message naming it), so a pool can be searched while it is still being built. Parts of one run are ascending and contiguous, so the concatenation is a valid sorted stream and `--to` on such a search produces a normal supplier file. `--from` may also be repeated to read an explicit list of files, in the order given.
+
+```
+immolate -f brainstorm_blueprint -c 2 --from perkeo_full.seeds --to bb.seeds   (parts 1-42 of 50 done: reads those)
+```
+
 Seeds are stored as ranks (see `s_from_rank` in `lib/seed.cl`), sorted ascending and delta-coded as LEB128 varints, so a pool that keeps a few percent of seeds costs about one byte per seed: a Soul pool over 100 billion seeds is about 4 GB, a Perkeo pool about 1 GB. The 116-byte header records the filter name, cutoff, range and count; the format is documented in `lib/supplier.h`. Because the walk is in ascending rank order the file is globally sorted, and searches over it print seeds in ascending order too.
 
 A filter run over a pool starts from a fresh instance like any other, so it must reproduce whatever RNG draws the supplier filter made to find its feature; the pool only says which seeds are worth the work. Keep the supplier filter's pack order and ante range in mind when writing the consumer (or call the same helper, such as `pack_has_soul`).

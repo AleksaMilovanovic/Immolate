@@ -316,7 +316,7 @@ static size_t sup_reader_next(sup_reader* r, int64_t* out, size_t max) {
 // Skips every rank <= last_rank (the file is sorted). Returns how many were
 // skipped. The first rank above last_rank is held back and returned by the next
 // sup_reader_next call.
-static uint64_t sup_reader_skip_through(sup_reader* r, int64_t last_rank) {
+static inline uint64_t sup_reader_skip_through(sup_reader* r, int64_t last_rank) {
     uint64_t skipped = 0;
     int64_t v;
     while (sup_reader_next(r, &v, 1) == 1) {
@@ -335,6 +335,185 @@ static void sup_reader_close(sup_reader* r) {
     free(r->buf);
     r->f = NULL;
     r->buf = NULL;
+}
+
+// ----------------------------------------------------------- multi-reader ----
+// Reads several supplier files as one ascending stream: the completed parts of
+// a --to_parts run, or any explicit list. Files are read in the order given;
+// parts of one run are ascending and contiguous, so their concatenation is
+// sorted. The aggregate header takes filter, cutoff, range and flags from the
+// first file and sums the counts.
+#define SUP_MAX_FILES 4096
+typedef struct SupplierMulti {
+    char** paths;
+    int num_paths;
+    int cur;               // index of the file currently open, or num_paths when done
+    sup_reader r;
+    int r_open;
+    sup_header header;     // aggregate
+    int has_pending;
+    int64_t pending;
+} sup_multi;
+
+// Header-only peek. Returns NULL and fills *h on success, else a message.
+static const char* sup_peek_header(const char* path, sup_header* h) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return "cannot open file";
+    unsigned char buf[SUP_HEADER_SIZE];
+    size_t got = fread(buf, 1, SUP_HEADER_SIZE, f);
+    fclose(f);
+    if (got != SUP_HEADER_SIZE) return "file too short for a header";
+    return sup_decode_header(buf, h);
+}
+// A file is complete when it was closed cleanly, or (files from before the
+// flag existed) when its count was patched in.
+static int sup_header_complete(const sup_header* h) {
+    return (h->flags & SUP_FLAG_CLOSED) || h->count > 0;
+}
+
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <dirent.h>
+#endif
+// Finds the part files of `base` (base.part<k>of<K>) in its directory. Fills
+// out_paths (malloc'd strings) in ascending k, returns the number found, and
+// sets *K. Returns 0 if there are none; -1 if parts of different K coexist.
+static int sup_discover_parts(const char* base, char** out_paths, int max, int* K) {
+    // Split into directory and file name.
+    const char* slash = strrchr(base, '/');
+#ifdef _WIN32
+    const char* bslash = strrchr(base, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
+    char dir[2048];
+    const char* name = base;
+    if (slash) {
+        size_t n = (size_t)(slash - base);
+        if (n >= sizeof dir - 1) return 0;
+        memcpy(dir, base, n); dir[n] = '\0';
+        name = slash + 1;
+    } else {
+        strcpy(dir, ".");
+    }
+    size_t nlen = strlen(name);
+    int found = 0, k_of[SUP_MAX_FILES], kk = 0;
+    char* tmp_paths[SUP_MAX_FILES];
+    int tmp_k[SUP_MAX_FILES];
+#ifdef _WIN32
+    char pattern[2304];
+    snprintf(pattern, sizeof pattern, "%s\\%s.part*of*", dir, name);
+    WIN32_FIND_DATAA fd;
+    HANDLE hf = FindFirstFileA(pattern, &fd);
+    if (hf == INVALID_HANDLE_VALUE) return 0;
+    do {
+        const char* fn = fd.cFileName;
+#else
+    DIR* d = opendir(dir);
+    if (!d) return 0;
+    struct dirent* de;
+    while ((de = readdir(d)) != NULL) {
+        const char* fn = de->d_name;
+#endif
+        if (strncmp(fn, name, nlen) == 0 && strncmp(fn + nlen, ".part", 5) == 0) {
+            int p = 0, q = 0, used = 0;
+            if (sscanf(fn + nlen + 5, "%dof%d%n", &p, &q, &used) == 2 && fn[nlen + 5 + used] == '\0' && p >= 1 && q >= p && found < SUP_MAX_FILES) {
+                if (kk == 0) kk = q;
+                if (q != kk) { found = -1; break; }
+                size_t plen = strlen(dir) + 1 + strlen(fn) + 1;
+                tmp_paths[found] = (char*)malloc(plen);
+                if (slash) snprintf(tmp_paths[found], plen, "%s%c%s", dir, slash[0], fn);
+                else snprintf(tmp_paths[found], plen, "%s", fn);
+                tmp_k[found] = p;
+                found++;
+            }
+        }
+#ifdef _WIN32
+    } while (FindNextFileA(hf, &fd));
+    FindClose(hf);
+#else
+    }
+    closedir(d);
+#endif
+    if (found <= 0) return found;
+    // Insertion sort by k (few files).
+    for (int i = 1; i < found; i++) {
+        char* pp = tmp_paths[i]; int pk = tmp_k[i]; int j = i - 1;
+        while (j >= 0 && tmp_k[j] > pk) { tmp_paths[j + 1] = tmp_paths[j]; tmp_k[j + 1] = tmp_k[j]; j--; }
+        tmp_paths[j + 1] = pp; tmp_k[j + 1] = pk;
+    }
+    int n = found < max ? found : max;
+    for (int i = 0; i < n; i++) { out_paths[i] = tmp_paths[i]; k_of[i] = tmp_k[i]; }
+    for (int i = n; i < found; i++) free(tmp_paths[i]);
+    (void)k_of;
+    *K = kk;
+    return n;
+}
+
+// Opens a list of files. Each is validated; incomplete ones (still being
+// written, or truncated) are skipped with a message. Returns NULL on success.
+static const char* sup_multi_open(sup_multi* m, char** paths, int num) {
+    memset(m, 0, sizeof *m);
+    m->paths = (char**)malloc(sizeof(char*) * (size_t)(num > 0 ? num : 1));
+    int kept = 0;
+    for (int i = 0; i < num; i++) {
+        sup_header h;
+        const char* err = sup_peek_header(paths[i], &h);
+        if (err) { fprintf(stderr, "Skipping %s: %s.\n", paths[i], err); continue; }
+        if (!sup_header_complete(&h)) { fprintf(stderr, "Skipping %s: not finished (still being written, or interrupted; --resume it first).\n", paths[i]); continue; }
+        if (kept == 0) { m->header = h; }
+        else {
+            m->header.count += h.count;
+            if (strcmp(h.filter, m->header.filter) != 0 || h.cutoff != m->header.cutoff)
+                fprintf(stderr, "Note: %s was made with filter %s at cutoff %lld, unlike the first file.\n", paths[i], h.filter, (long long)h.cutoff);
+        }
+        m->paths[kept++] = paths[i];
+    }
+    m->num_paths = kept;
+    if (kept == 0) return "no complete seed-supplier files";
+    m->cur = -1;
+    return NULL;
+}
+
+// Moves to the next file. Returns 0 when there are none left.
+static int sup_multi_advance(sup_multi* m) {
+    if (m->r_open) { sup_reader_close(&m->r); m->r_open = 0; }
+    while (++m->cur < m->num_paths) {
+        const char* err = sup_reader_open(&m->r, m->paths[m->cur]);
+        if (err) { fprintf(stderr, "Skipping %s: %s.\n", m->paths[m->cur], err); continue; }
+        m->r_open = 1;
+        return 1;
+    }
+    return 0;
+}
+
+static size_t sup_multi_next(sup_multi* m, int64_t* out, size_t max) {
+    size_t n = 0;
+    if (max > 0 && m->has_pending) { out[n++] = m->pending; m->has_pending = 0; }
+    while (n < max) {
+        if (!m->r_open && !sup_multi_advance(m)) break;
+        size_t got = sup_reader_next(&m->r, out + n, max - n);
+        n += got;
+        if (got == 0) { sup_reader_close(&m->r); m->r_open = 0; }
+    }
+    return n;
+}
+
+static uint64_t sup_multi_skip_through(sup_multi* m, int64_t last_rank) {
+    uint64_t skipped = 0;
+    int64_t v;
+    while (sup_multi_next(m, &v, 1) == 1) {
+        if (v > last_rank) { m->has_pending = 1; m->pending = v; break; }
+        skipped++;
+    }
+    return skipped;
+}
+
+static void sup_multi_close(sup_multi* m) {
+    if (m->r_open) sup_reader_close(&m->r);
+    m->r_open = 0;
+    free(m->paths);
+    m->paths = NULL;
 }
 
 #endif

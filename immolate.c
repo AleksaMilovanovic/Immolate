@@ -31,7 +31,9 @@ int main(int argc, char **argv) {
     cl_long prefilterBatch = 1 << 26; // 67M seeds per pass-1 batch: 512 MB survivor buffer worst case
     int progressEvery = 0;
     const char* toFile = NULL;   // --to: write passing seeds to a supplier file
-    const char* fromFile = NULL; // --from: take seeds from a supplier file
+    const char* fromFile = NULL; // --from: take seeds from a supplier file (first one given; also the "any --from" flag)
+    char* fromFiles[SUP_MAX_FILES]; // every --from given, or the parts discovered from a base name
+    int numFromFiles = 0;
     int toParts = 1;             // --to_parts: split --to output into this many numbered files
     const char* resumeFile = NULL; // --resume: continue an interrupted --to run from this part file
     cl_long forcedStartRank = -1;  // start rank restored from a resumed file's header
@@ -46,7 +48,7 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per prefilter batch in a two-pass search. Defaults to 67108864.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--from <FILE>    Search only the seeds listed in seed-supplier file FILE (made with --to) instead of a rank range. -n caps how many are read. Prefilters are skipped.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per prefilter batch in a two-pass search. Defaults to 67108864.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--from <FILE>    Search only the seeds listed in seed-supplier file FILE (made with --to) instead of a rank range. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
             return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
@@ -113,7 +115,8 @@ int main(int argc, char **argv) {
             i++;
         }
         if (strcmp(argv[i],  "--from")==0) {
-            fromFile = argv[i+1];
+            if (!fromFile) fromFile = argv[i+1];
+            if (numFromFiles < SUP_MAX_FILES) fromFiles[numFromFiles++] = argv[i+1];
             i++;
         }
         if (strcmp(argv[i],  "--resume")==0) {
@@ -527,14 +530,29 @@ build_program:
     printf_s("Launching %zu work-groups of %zu work-items (%zu total).\n", (size_t)numGroups, localSize, globalSize);
 
     // Seed-supplier input.
-    sup_reader reader;
+    sup_multi reader;
     if (fromFile) {
-        const char* rerr = sup_reader_open(&reader, fromFile);
+        // A single --from that is not a file but has part files next to it is a
+        // --to_parts base name: expand it to its finished parts.
+        if (numFromFiles == 1) {
+            FILE* probe = fopen(fromFiles[0], "rb");
+            if (probe) fclose(probe);
+            else {
+                int K = 0;
+                int found = sup_discover_parts(fromFiles[0], fromFiles, SUP_MAX_FILES, &K);
+                if (found == -1) { fprintf_s(stderr, "%s has part files from runs with different part counts; pass the files explicitly.\n", fromFile); exit(EXIT_FAILURE); }
+                if (found == 0) { fprintf_s(stderr, "Cannot read seed-supplier file %s: no such file and no %s.part*of* files.\n", fromFile, fromFile); exit(EXIT_FAILURE); }
+                numFromFiles = found;
+                printf_s("%s: found %d of %d parts.\n", fromFile, found, K);
+            }
+        }
+        const char* rerr = sup_multi_open(&reader, fromFiles, numFromFiles);
         if (rerr) {
             fprintf_s(stderr, "Cannot read seed-supplier file %s: %s.\n", fromFile, rerr);
             exit(EXIT_FAILURE);
         }
-        printf_s("Reading %llu seeds from %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, fromFile, reader.header.filter, (long long)reader.header.cutoff);
+        if (reader.num_paths == 1) printf_s("Reading %llu seeds from %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.paths[0], reader.header.filter, (long long)reader.header.cutoff);
+        else printf_s("Reading %llu seeds from %d files, %s .. %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.num_paths, reader.paths[0], reader.paths[reader.num_paths - 1], reader.header.filter, (long long)reader.header.cutoff);
     }
     // Seed-supplier output. Opened before the search so a bad path fails fast.
     // The header's range is the rank range the pool descends from: under --from
@@ -607,11 +625,11 @@ build_program:
                 printf_s("Starting %s.\n", partPath);
             } else if (fromFile) {
                 // Position the source after the last hit, but no earlier than the part's start.
-                uint64_t skipped = lastRank >= 0 ? sup_reader_skip_through(&reader, lastRank) : 0;
+                uint64_t skipped = lastRank >= 0 ? sup_multi_skip_through(&reader, lastRank) : 0;
                 while ((cl_long)skipped < partStart) {
                     int64_t scratch[4096];
                     size_t want = (size_t)(partStart - (cl_long)skipped) < 4096 ? (size_t)(partStart - (cl_long)skipped) : 4096;
-                    size_t g = sup_reader_next(&reader, scratch, want);
+                    size_t g = sup_multi_next(&reader, scratch, want);
                     if (g == 0) break;
                     skipped += g;
                 }
@@ -716,7 +734,7 @@ build_program:
             if (fromFile) {
                 if (totalIn >= numSeeds) break;
                 size_t want = (size_t)(numSeeds - totalIn < batchCap ? numSeeds - totalIn : batchCap);
-                size_t got = sup_reader_next(&reader, (int64_t*)hostRanks, want);
+                size_t got = sup_multi_next(&reader, (int64_t*)hostRanks, want);
                 if (got == 0) break;
                 thisBatch = (cl_long)got;
                 err = clEnqueueWriteBuffer(queue, listBuf, CL_TRUE, 0, sizeof(cl_long) * got, hostRanks, 0, NULL, NULL);
@@ -832,7 +850,7 @@ build_program:
             else if (toParts > 1) printf_s("Wrote %lld of %lld seeds to %d files %s.part1of%d .. part%dof%d.\n", (long long)totalOut, (long long)totalIn, partIndex, toFile, toParts, partIndex, toParts);
             else printf_s("Wrote %lld of %lld seeds to %s.\n", (long long)totalOut, (long long)totalIn, toFile);
         }
-        if (fromFile) sup_reader_close(&reader);
+        if (fromFile) sup_multi_close(&reader);
         free(hostRanks);
         clReleaseMemObject(listBuf);
         if (outBuf) clReleaseMemObject(outBuf);

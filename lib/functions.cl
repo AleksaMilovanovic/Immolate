@@ -389,6 +389,12 @@ itemtype get_item_type(shop shopInstance, double generatedValue) {
     return ItemType_Spectral;
 }
 
+// Note: the game locks a joker while it sits in the shop, so the two cards of
+// one shop window can never be the same joker (seed 114N, ante 1: the game shows
+// Wily Joker then Mail-In Rebate; this code gives Wily Joker twice). That reroll
+// is deliberately not modelled here: filters that count shop contents over many
+// rerolls want the raw draw stream, and the two agree on everything but exact
+// in-window duplicates.
 shopitem next_shop_item(instance* inst, int ante) {
     shop shopInstance = get_shop_instance(inst);
 
