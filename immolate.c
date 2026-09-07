@@ -532,18 +532,25 @@ build_program:
     // Seed-supplier input.
     sup_multi reader;
     if (fromFile) {
-        // A single --from that is not a file but has part files next to it is a
-        // --to_parts base name: expand it to its finished parts.
+        // A single --from is first tried as a --to_parts base name: if any
+        // FILE.part<k>of<K> exist next to it, those are read (finished ones
+        // only) and a plain FILE, if one also exists, is ignored: it can only be
+        // a leftover from another run, since a parts run never writes the base
+        // name. Only when there are no parts is FILE read as a single file.
         if (numFromFiles == 1) {
-            FILE* probe = fopen(fromFiles[0], "rb");
-            if (probe) fclose(probe);
-            else {
-                int K = 0;
-                int found = sup_discover_parts(fromFiles[0], fromFiles, SUP_MAX_FILES, &K);
-                if (found == -1) { fprintf_s(stderr, "%s has part files from runs with different part counts; pass the files explicitly.\n", fromFile); exit(EXIT_FAILURE); }
-                if (found == 0) { fprintf_s(stderr, "Cannot read seed-supplier file %s: no such file and no %s.part*of* files.\n", fromFile, fromFile); exit(EXIT_FAILURE); }
+            int K = 0;
+            int found = sup_discover_parts(fromFiles[0], fromFiles + 1, SUP_MAX_FILES - 1, &K);
+            if (found == -1) { fprintf_s(stderr, "%s has part files from runs with different part counts; pass the files explicitly.\n", fromFile); exit(EXIT_FAILURE); }
+            if (found > 0) {
+                FILE* stale = fopen(fromFiles[0], "rb");
+                if (stale) { fclose(stale); printf_s("Note: ignoring %s itself; reading its part files instead.\n", fromFile); }
+                for (int i = 0; i < found; i++) fromFiles[i] = fromFiles[i + 1];
                 numFromFiles = found;
                 printf_s("%s: found %d of %d parts.\n", fromFile, found, K);
+            } else {
+                FILE* probe = fopen(fromFiles[0], "rb");
+                if (!probe) { fprintf_s(stderr, "Cannot read seed-supplier file %s: no such file and no %s.part*of* files.\n", fromFile, fromFile); exit(EXIT_FAILURE); }
+                fclose(probe);
             }
         }
         const char* rerr = sup_multi_open(&reader, fromFiles, numFromFiles);
