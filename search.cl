@@ -12,8 +12,7 @@ __kernel void search(long start_rank, long num_seeds, long filter_cutoff) {
         long score = filter(&inst);
         // The cutoff is the value given with -c and never changes during a run.
         if (score >= filter_cutoff) {
-            text s_str = s_to_string(&_seed);
-            printf("%s (%li)\n", s_str.str, score);
+            s_print_score(&_seed, score);
         }
         s_skip(&_seed, stride);
     }
@@ -29,8 +28,7 @@ __kernel void search_ranks(__global const long* ranks, long num_ranks, long filt
         i_init(&inst, _seed);
         long score = filter(&inst);
         if (score >= filter_cutoff) {
-            text s_str = s_to_string(&_seed);
-            printf("%s (%li)\n", s_str.str, score);
+            s_print_score(&_seed, score);
         }
     }
 }
