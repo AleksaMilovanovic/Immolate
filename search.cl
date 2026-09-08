@@ -1,3 +1,15 @@
+// Filters normally define `long filter(instance* inst)`. A filter that wants
+// the -c cutoff (to stop early once a seed has passed it, or can no longer
+// reach it) defines FILTER_USES_CUTOFF and takes it as a second argument:
+//     #define FILTER_USES_CUTOFF
+//     long filter(instance* inst, long cutoff) { ... }
+// The value is the run's -c, unchanged; passing it costs nothing measurable.
+#ifdef FILTER_USES_CUTOFF
+#define RUN_FILTER(inst_ptr) filter(inst_ptr, filter_cutoff)
+#else
+#define RUN_FILTER(inst_ptr) filter(inst_ptr)
+#endif
+
 // Single-pass search: every seed in [start_rank, start_rank + num_seeds) runs
 // the filter and is printed if its score reaches the -c cutoff. Each lane
 // derives its first seed from its rank once, then steps by the stride.
@@ -9,7 +21,7 @@ __kernel void search(long start_rank, long num_seeds, long filter_cutoff) {
     for (; i < num_seeds; i += stride) {
         instance inst;
         i_init(&inst, _seed);
-        long score = filter(&inst);
+        long score = RUN_FILTER(&inst);
         // The cutoff is the value given with -c and never changes during a run.
         if (score >= filter_cutoff) {
             s_print_score(&_seed, score);
@@ -26,7 +38,7 @@ __kernel void search_ranks(__global const long* ranks, long num_ranks, long filt
         seed _seed = s_from_rank(ranks[i]);
         instance inst;
         i_init(&inst, _seed);
-        long score = filter(&inst);
+        long score = RUN_FILTER(&inst);
         if (score >= filter_cutoff) {
             s_print_score(&_seed, score);
         }
@@ -91,7 +103,7 @@ inline void collect_flush(long mine[], int n, __global long* out, volatile __glo
 // Full filter over a rank range, collecting seeds whose score reaches the cutoff.
 __kernel void search_collect(long start_rank, long num_seeds, long filter_cutoff,
                              __global long* out, volatile __global uint* out_count) {
-    COLLECT_RANGE_BODY(filter(&inst) >= filter_cutoff)
+    COLLECT_RANGE_BODY(RUN_FILTER(&inst) >= filter_cutoff)
 }
 
 // Full filter over a packed rank list, collecting seeds whose score reaches the
@@ -111,7 +123,7 @@ __kernel void search_ranks_collect(__global const long* ranks, long num_ranks, l
                 seed _seed = s_from_rank(ranks[i]);
                 instance inst;
                 i_init(&inst, _seed);
-                if (filter(&inst) >= filter_cutoff) mine[n++] = ranks[i];
+                if (RUN_FILTER(&inst) >= filter_cutoff) mine[n++] = ranks[i];
                 i += gsize;
             }
         }

@@ -14,7 +14,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Deep Negative Shops:** Scans every shop and Buffoon Pack of antes 3-38 (30 to 231 reroll frames per ante, frame size growing with Overstock / Overstock Plus or with ante) and counts negative copy jokers, negative uncommons, other negatives plus Diet Colas, and first- and second-slot Negative Tags. Score is five 3-digit fields in that order. Jokers a fresh profile has not unlocked are locked by default (lists at the top of the file, split by rarity); add a joker to the matching `UNLOCKED` list to search as a profile that has earned it. Run it over a pool with `--from`; at ~11,000 cards per seed it is far too slow for a raw walk.
 - **Deep Rarity Shops:** Same shops, packs and voucher rules as Deep Negative Shops, but counts jokers by rarity. Score is rare (4 digits) | uncommon (4 digits) | common (5 digits), each field capped. Draws only the rarity poll per joker, so it is about three times cheaper than Deep Negative Shops; still meant for `--from` pools.
 - **Double Legendary:** Searches for a seed with two legendary jokers in Ante 1. Every Arcana or Spectral Pack in the shop must be opened.
-- **Early Ante Perkeo:** Seed-supplier filter: The Soul (score 1) or Perkeo from The Soul (score 2) in any Arcana/Spectral pack of the first two antes.
+- **Early Ante Perkeo:** Seed-supplier filter: The Soul (score 1) or Perkeo from The Soul (score 2) in any Arcana/Spectral pack of the first two antes (4 pack slots in ante 1, 6 in ante 2).
 	- Run once with `--to` to build a pool (`-c 1` keeps ~4% of seeds, `-c 2` ~0.8%), then search that pool with `--from` instead of walking every seed. See the comments in the filter and the Seed-Supplier Files section of the documentation.
 - **Emperor Fool:** Searches for Emperor-Fool Chains.
 	- Score output is the length of the chain, with the last digit being the ante that The Emperor must be used in to start the chain.
@@ -28,7 +28,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Four Deadly Jokers:** Searches for a first shop buffoon pack with the four jokers that give increased mult to suits.
 - **High Score Demo:** Searches for a seed with a good setup for high score world record runs.
 	- Because this filter was written during Balatro's demo, its search criteria is far from optimal for the current world record strategy.
-- **Immolate Sixth Sense:** Sixth Sense obtainable from a shop or Buffoon Pack in antes 1-3, and Immolate among the first two spectral cards it creates from that ante on. Score is the number of Immolates. Checks the creations first (two draws per ante) and only then scans shops, drawing a joker's identity only when its rarity poll says Uncommon. Carries the same fresh-profile joker lock lists as Deep Negative Shops, so locked uncommons reroll as in the game.
+- **Immolate Sixth Sense:** Sixth Sense or Seance obtainable from a shop or Buffoon Pack in antes 1-3, and Immolate among the spectral cards it creates from that ante on (first two per ante for Sixth Sense, first four for Seance). Score is the number of Immolates over both jokers. Checks the creations first (two draws per ante) and only then scans shops, drawing a joker's identity only when its rarity poll says Uncommon. Carries the same fresh-profile joker lock lists as Deep Negative Shops, so locked uncommons reroll as in the game.
 - **Legendary Skip:** Searches for a seed where a Legendary Joker is obtainable through a tag in Ante 1.
 - **Longest Joker Name:** Searches for seeds with a Polychrome Perishable Rental Delayed Gratification in the first shop.
 	- Requires Gold Stake.
@@ -38,7 +38,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Most Jokers:** Finds seeds with Perkeo, Ankh and Ectoplasm as consumables from shop. Used for most jokers WR (with eternal jokers).
 	- Requires Ghost Deck.
 	- Score output displays the pack number containing Perkeo, the ante containing Ankh, and then the ante containing Ectoplasm.
-- **Negative Tags:** Score is the number of Negative Tags offered as skip tags in antes 1 to 38 (two per ante), with the game's ante-1 tag locks applied. Change `NT_MAX_ANTE` in the filter to look further, and edit `NT_LOCKED_TAGS` to match the tags your profile has not unlocked (Foil, Holographic and Polychrome by default), since a locked tag rerolls and shifts later draws. Intended to run over a seed-supplier pool with `--from`.
+- **Negative Tags:** Score is first-slot Negative Tags times 100 plus second-slot ones, over antes 1 to 38, with the game's ante-1 tag locks applied. Reads the `-c` cutoff and stops drawing once a seed has passed or can no longer pass, so survivors carry a lower bound; rerun them with `-c 0` for exact counts. Change `NT_MAX_ANTE` in the filter to look further, and edit `NT_LOCKED_TAGS` to match the tags your profile has not unlocked (Foil, Holographic and Polychrome by default), since a locked tag rerolls and shifts later draws. Intended to run over a seed-supplier pool with `--from`.
 - **Orbital Test:** A filter to test the capability of searching Orbital Tag output, which is currently WIP.
 - **Perkeo Analyzer:** Prints all consumable generator queues of a seed (Seals, Judgement, Wraith, etc.)
 	- The name has nothing to do with the joker Perkeo.

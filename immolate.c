@@ -228,8 +228,18 @@ int main(int argc, char **argv) {
         size_t got = fread(hb, 1, SUP_HEADER_SIZE, rf);
         fclose(rf);
         sup_header rh;
-        const char* herr = got == SUP_HEADER_SIZE ? sup_decode_header(hb, &rh) : "file too short for a header";
+        memset(&rh, 0, sizeof rh);
+        int emptyResume = (got == 0);
+        const char* herr = emptyResume ? NULL : (got == SUP_HEADER_SIZE ? sup_decode_header(hb, &rh) : "file too short for a header");
         if (herr) { fprintf_s(stderr, "Cannot resume from %s: %s.\n", resumeFile, herr); exit(EXIT_FAILURE); }
+        if (emptyResume) {
+            // Nothing to read settings from: they must come from the command line
+            // (or the defaults), exactly as for the original run.
+            printf_s("%s is a 0-byte file; using the filter, cutoff, range and part count from this command line.\n", resumeFile);
+            strcpy_s(rh.filter, sizeof rh.filter, filter);
+            rh.cutoff = cutoff; rh.start_rank = seed_rank(&startingSeed); rh.num_seeds = numSeeds;
+            rh.flags = fromFile ? SUP_FLAG_FROM_FILE : 0;
+        }
         if ((rh.flags & SUP_FLAG_FROM_FILE) && !fromFile) { fprintf_s(stderr, "--resume: %s was made from a supplier file (--from); pass the same --from to resume it.\n", resumeFile); exit(EXIT_FAILURE); }
         if (!(rh.flags & SUP_FLAG_FROM_FILE) && fromFile) { fprintf_s(stderr, "--resume: %s was made from a seed range, not from a supplier file; drop --from to resume it.\n", resumeFile); exit(EXIT_FAILURE); }
         if (userFilter && strcmp(filter, rh.filter) != 0) { fprintf_s(stderr, "--resume: %s was made with filter %s, not %s.\n", resumeFile, rh.filter, filter); exit(EXIT_FAILURE); }
@@ -605,7 +615,17 @@ build_program:
             int64_t lastRank = -1;
             int complete = 0;
             const char* rerr = sup_writer_reopen(&writer, resumeFile, &rh, &lastRank, &complete);
-            if (rerr) { fprintf_s(stderr, "Cannot resume from %s: %s.\n", resumeFile, rerr); exit(EXIT_FAILURE); }
+            int emptyPart = rerr && strcmp(rerr, "empty") == 0;
+            if (rerr && !emptyPart) { fprintf_s(stderr, "Cannot resume from %s: %s.\n", resumeFile, rerr); exit(EXIT_FAILURE); }
+            if (emptyPart) {
+                printf_s("%s is empty (the previous run died before writing it); starting it from the beginning of its range.\n", resumeFile);
+                lastRank = -1; // falls through to the positioning code below, which skips to partStart
+                if (!sup_writer_open(&writer, resumeFile, filter, cutoff, hdrStart, hdrNum, hdrFlags)) {
+                    fprintf_s(stderr, "Cannot open %s for writing.\n", resumeFile);
+                    exit(EXIT_FAILURE);
+                }
+                rh.start_rank = hdrStart; rh.num_seeds = hdrNum; rh.flags = hdrFlags;
+            }
             if (fromFile && ((cl_long)rh.start_rank != hdrStart || (cl_long)rh.num_seeds != hdrNum)) {
                 fprintf_s(stderr, "--resume: %s descends from a different source than %s (range %lld+%lld vs %lld+%lld).\n",
                           resumeFile, fromFile, (long long)rh.start_rank, (long long)rh.num_seeds, (long long)hdrStart, (long long)hdrNum);
@@ -624,6 +644,23 @@ build_program:
                 partEnd = partIndex == toParts ? inputs : (cl_long)partIndex * partInputs;
                 partStart = (cl_long)(partIndex - 1) * partInputs;
                 resumeAt = partStart;
+                if (fromFile) {
+                    // The source reader is at the start of the pool; advance it to
+                    // this part's first input seed so the new part covers its own
+                    // slice rather than re-searching the pool from the beginning.
+                    cl_long skipped = 0;
+                    int64_t scratch[4096];
+                    while (skipped < partStart) {
+                        size_t want = (size_t)(partStart - skipped) < 4096 ? (size_t)(partStart - skipped) : 4096;
+                        size_t g = sup_multi_next(&reader, scratch, want);
+                        if (g == 0) break;
+                        skipped += (cl_long)g;
+                    }
+                    if (skipped != partStart) {
+                        fprintf_s(stderr, "--resume: source has only %lld seeds, but part %d starts at %lld.\n", (long long)skipped, partIndex, (long long)partStart);
+                        exit(EXIT_FAILURE);
+                    }
+                }
                 snprintf(partPath, sizeof partPath, "%s.part%dof%d", toFile, partIndex, toParts);
                 if (!sup_writer_open(&writer, partPath, filter, cutoff, hdrStart, hdrNum, hdrFlags)) {
                     fprintf_s(stderr, "Cannot open %s for writing.\n", partPath);
@@ -665,6 +702,7 @@ build_program:
 
     // Execute OpenCL kernel
     printf_s("Starting searcher...\n");
+    fflush(stdout);
     clock_t begin = clock();
     if (!twoPass && !toFile && !fromFile) {
         // Plain single pass: print straight from the kernel.
@@ -828,6 +866,7 @@ build_program:
                     exit(EXIT_FAILURE);
                 }
                 printf_s("Finished %s: %llu seeds.\n", partPath, (unsigned long long)writer.count);
+                fflush(stdout);
                 partIndex++;
                 partEnd += partInputs;
                 snprintf(partPath, sizeof partPath, "%s.part%dof%d", toFile, partIndex, toParts);
@@ -842,6 +881,7 @@ build_program:
                 if (twoPass) fprintf(stderr, "[%lld / %lld seeds, %lld survivors, %lld written, %.1fs]\n",
                         (long long)totalIn, (long long)numSeeds, (long long)totalSurvivors, (long long)totalOut, elapsed);
                 else fprintf(stderr, "[%lld seeds, %lld written, %.1fs]\n", (long long)totalIn, (long long)totalOut, elapsed);
+                fflush(stderr);
             }
         }
         err = clFinish(queue);

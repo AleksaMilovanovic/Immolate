@@ -127,7 +127,7 @@ static int sup_writer_open(sup_writer* w, const char* path, const char* filter, 
     h.num_seeds = num_seeds;
     unsigned char buf[SUP_HEADER_SIZE];
     sup_encode_header(buf, &h);
-    if (fwrite(buf, 1, SUP_HEADER_SIZE, w->f) != SUP_HEADER_SIZE) { fclose(w->f); w->f = NULL; return 0; }
+    if (fwrite(buf, 1, SUP_HEADER_SIZE, w->f) != SUP_HEADER_SIZE || fflush(w->f) != 0) { fclose(w->f); w->f = NULL; return 0; }
     w->prev = -1; // one below the lowest rank, so rank 0 (the empty seed) can be first
     return 1;
 }
@@ -159,6 +159,9 @@ static int sup_writer_append(sup_writer* w, int64_t* ranks, size_t n) {
         w->enc[len++] = (unsigned char)d;
     }
     if (fwrite(w->enc, 1, len, w->f) != len) return 0;
+    // Push every batch to the OS at once: a killed run then loses nothing and
+    // leaves no partial record for --resume to trim.
+    if (fflush(w->f) != 0) return 0;
     w->prev = prev;
     w->count += n;
     return 1;
@@ -196,24 +199,34 @@ static int sup_writer_close(sup_writer* w) {
 // body, or -1 if it is empty. Returns 0 with a message on failure.
 static const char* sup_writer_reopen(sup_writer* w, const char* path, sup_header* h, int64_t* last_rank, int* complete) {
     memset(w, 0, sizeof *w);
-    w->f = fopen(path, "r+b");
-    if (!w->f) return "cannot open file for update";
+    FILE* f = fopen(path, "rb");
+    if (!f) return "cannot open file";
     unsigned char buf[SUP_HEADER_SIZE];
-    if (fread(buf, 1, SUP_HEADER_SIZE, w->f) != SUP_HEADER_SIZE) { fclose(w->f); w->f = NULL; return "file too short for a header"; }
+    size_t got = fread(buf, 1, SUP_HEADER_SIZE, f);
+    if (got == 0) {
+        // A 0-byte part: the previous run created it and died before its header
+        // reached the disk. Nothing in it; the caller starts this part afresh.
+        fclose(f);
+        memset(h, 0, sizeof *h);
+        *last_rank = -1;
+        *complete = 0;
+        return "empty";
+    }
+    if (got != SUP_HEADER_SIZE) { fclose(f); return "file too short for a header"; }
     const char* err = sup_decode_header(buf, h);
-    if (err) { fclose(w->f); w->f = NULL; return err; }
+    if (err) { fclose(f); return err; }
     w->flags = h->flags & ~SUP_FLAG_CLOSED;
     *complete = (h->flags & SUP_FLAG_CLOSED) || h->count > 0;
-    // Scan the body varint by varint.
+    // Scan the body varint by varint, read-only.
     int64_t prev = -1;
     uint64_t count = 0;
     int64_t good_end = SUP_HEADER_SIZE; // byte offset just after the last complete varint
     int64_t pos = SUP_HEADER_SIZE;
     uint64_t d = 0;
     int shift = 0;
-    unsigned char rb[1 << 16];
+    static unsigned char rb[1 << 20];
     size_t n;
-    while ((n = fread(rb, 1, sizeof rb, w->f)) > 0) {
+    while ((n = fread(rb, 1, sizeof rb, f)) > 0) {
         for (size_t i = 0; i < n; i++) {
             unsigned char b = rb[i];
             pos++;
@@ -226,17 +239,22 @@ static const char* sup_writer_reopen(sup_writer* w, const char* path, sup_header
                 d = 0;
                 shift = 0;
             } else if (shift >= 64) {
-                fclose(w->f); w->f = NULL; return "corrupt varint in body";
+                fclose(f); return "corrupt varint in body";
             }
         }
     }
-    if (pos != good_end) {
-        fprintf(stderr, "Dropping %lld trailing bytes of an incomplete record from %s.\n", (long long)(pos - good_end), path);
-        if (sup_truncate(w->f, good_end) != 0) { fclose(w->f); w->f = NULL; return "cannot truncate partial record"; }
-    }
+    fclose(f);
     if (*complete && h->count != count) {
         fprintf(stderr, "%s says %llu ranks but holds %llu; treating it as incomplete.\n", path, (unsigned long long)h->count, (unsigned long long)count);
         *complete = 0;
+    }
+    // Reopen for update and position after the last complete record. Truncate
+    // first through a fresh handle so no stale read buffer is in play.
+    w->f = fopen(path, "r+b");
+    if (!w->f) return "cannot open file for update";
+    if (pos != good_end) {
+        fprintf(stderr, "Dropping %lld trailing bytes of an incomplete record from %s.\n", (long long)(pos - good_end), path);
+        if (sup_truncate(w->f, good_end) != 0) { fclose(w->f); w->f = NULL; return "cannot truncate partial record"; }
     }
     if (sup_fseek64(w->f, good_end, SEEK_SET) != 0) { fclose(w->f); w->f = NULL; return "cannot seek"; }
     w->prev = prev;

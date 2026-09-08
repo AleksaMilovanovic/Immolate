@@ -13,9 +13,10 @@
 //   2  at least one of those Souls awards Perkeo
 // so one walk at -c 1 gives the Soul pool and -c 2 the Perkeo pool.
 //
-// Packs checked: EAP_PACKS_PER_ANTE pack slots in each of antes 1 and 2, in
-// the order the game rolls them (three shops of two packs each, no rerolls).
-// The very first slot is the forced Buffoon Pack and can never hold a Soul.
+// Packs checked: EAP_PACKS_ANTE1 (4) slots in ante 1 and EAP_PACKS_ANTE2 (6)
+// in ante 2, in the order the game rolls them, no rerolls. Ante 1 has fewer
+// because the run skips nothing yet and its first shop pack is the forced
+// Buffoon Pack, which can never hold a Soul; the 4th slot covers one reroll.
 // Only Arcana and Spectral packs are looked at; the check uses pack_has_soul
 // (lib/functions.cl), which replays the soul polls exactly without drawing the
 // tarot/spectral cards, so it costs one node lookup per candidate pack.
@@ -25,14 +26,18 @@
 // pack_has_soul the same way) rather than assuming the Soul's position.
 #include "lib/immolate.cl"
 
-#ifndef EAP_PACKS_PER_ANTE
-#define EAP_PACKS_PER_ANTE 6
+#ifndef EAP_PACKS_ANTE1
+#define EAP_PACKS_ANTE1 4
+#endif
+#ifndef EAP_PACKS_ANTE2
+#define EAP_PACKS_ANTE2 6
 #endif
 
 long filter(instance* inst) {
     long score = 0;
     for (int ante = 1; ante <= 2; ante++) {
-        for (int p = 0; p < EAP_PACKS_PER_ANTE; p++) {
+        int packs = ante == 1 ? EAP_PACKS_ANTE1 : EAP_PACKS_ANTE2;
+        for (int p = 0; p < packs; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
             if (_pack.type != Arcana_Pack && _pack.type != Spectral_Pack) continue;
             if (!pack_has_soul(inst, _pack, ante)) continue;
