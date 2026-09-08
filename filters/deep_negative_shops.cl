@@ -65,8 +65,8 @@ __constant item DNS_LOCKED_RARES[] = {
     Stuntman, Invisible_Joker, Brainstorm, Drivers_License, Burnt_Joker
 };
 __constant item DNS_UNLOCKED_COMMONS[] = {};
-__constant item DNS_UNLOCKED_UNCOMMONS[] = {};
-__constant item DNS_UNLOCKED_RARES[] = {};
+__constant item DNS_UNLOCKED_UNCOMMONS[] = {Showman};
+__constant item DNS_UNLOCKED_RARES[] = {Blueprint, Brainstorm};
 
 #define DNS_APPLY_LOCKS(list, fn) for (int _i = 0; _i < (int)(sizeof(list) / sizeof(item)); _i++) fn(inst, list[_i]);
 

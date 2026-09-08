@@ -19,6 +19,8 @@
 // Edit the list to match your profile; leave it empty ({}) for everything
 // unlocked. Note init_unlocks(ante 2) re-enables Negative Tag; the list below
 // is re-applied every ante so it is never undone by that.
+#define CACHE_SIZE 512
+
 #include "lib/immolate.cl"
 
 #ifndef NT_MAX_ANTE
@@ -30,11 +32,13 @@ __constant item NT_LOCKED_TAGS[] = { Foil_Tag, Holographic_Tag, Polychrome_Tag }
 long filter(instance* inst) {
     init_locks(inst, 1, false, false);
     for (int i = 0; i < (int)NT_NUM_LOCKED_TAGS; i++) i_lock(inst, NT_LOCKED_TAGS[i]);
-    long negativeTags = 0;
+    long negativeTags1 = 0;
+    long negativeTags2 = 0;
     for (int ante = 1; ante <= NT_MAX_ANTE; ante++) {
         init_unlocks(inst, ante, false);
-        if (next_tag(inst, ante) == Negative_Tag) negativeTags++;
-        if (next_tag(inst, ante) == Negative_Tag) negativeTags++;
+        if (next_tag(inst, ante) == Negative_Tag) negativeTags1++;
+        if (next_tag(inst, ante) == Negative_Tag) negativeTags2++;
     }
-    return negativeTags;
+    // We want to differentiate the tag position
+    return negativeTags1 * 100 + negativeTags2;
 }
