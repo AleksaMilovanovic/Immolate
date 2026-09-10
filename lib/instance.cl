@@ -173,26 +173,10 @@ item randchoice(instance* inst, ntype nts[], int ids[], int num, __constant item
     return items[l_randint(&(inst->rng), 1, items[0])];
 }
 
-inline item randchoice_bound(instance* inst, rng_node_id node_id, __constant item items[]) {
-    inst->rng = randomseed(rng_node_advance(inst, node_id));
-    return items[l_randint(&(inst->rng), 1, items[0])];
-}
-
 // The most common form of randchoice
 // Now with rerolls!
 item randchoice_common(instance* inst, rtype rngType, rsrc src, int ante, __constant item items[]) {
     item i = randchoice(inst, (__private ntype[]){N_Type, N_Source, N_Ante}, (__private int[]){rngType, src, ante}, 3, items);
-    if (!inst->params.showman && i_locked(inst, i)) {
-        int resampleNum = 1;
-        while (i_locked(inst, i)) {
-            i = randchoice(inst, (__private ntype[]){N_Type, N_Source, N_Ante, N_Resample}, (__private int[]){rngType, src, ante, resampleNum}, 4, items);
-            resampleNum++;
-        }
-    }
-    return i;
-}
-inline item randchoice_common_bound(instance* inst, rng_node_id node_id, rtype rngType, rsrc src, int ante, __constant item items[]) {
-    item i = randchoice_bound(inst, node_id, items);
     if (!inst->params.showman && i_locked(inst, i)) {
         int resampleNum = 1;
         while (i_locked(inst, i)) {
