@@ -13,6 +13,11 @@ typedef struct InstanceParameters {
 
 // Instance
 #define LOCKED_WORDS ((ITEMS_END + 63) / 64)
+// Seed-suffix hash states, indexed by node-name length (see get_node_child).
+// Names run from 4 ("Tag" + ante) to ~45 characters; longer ones just recompute.
+#ifndef SEED_HASH_LENS
+#define SEED_HASH_LENS 48
+#endif
 typedef struct GameInstance {
     seed seed;
     cache rngCache;
@@ -20,6 +25,12 @@ typedef struct GameInstance {
     lrandom rng;
     // Bitset over the item enum: one bit per item instead of one bool.
     ulong locked[LOCKED_WORDS];
+    // pseudohash state after consuming the seed characters at positions
+    // L+1..L+len, for each node-name length L seen so far; bit L of
+    // seedHashValid says whether entry L is filled. Every node created with a
+    // name of length L reuses this instead of re-hashing the seed.
+    ulong seedHashValid;
+    double seedHashByLen[SEED_HASH_LENS];
     instance_params params;
 } instance;
 
@@ -47,6 +58,7 @@ void i_init(instance* inst, seed s) {
     inst->rngCache.generatedFirstPack = false;
     inst->rngCache.reportedOverflow = false;
     inst->rngCache.nextFreeNode = 0;
+    inst->seedHashValid = 0UL; // entries are written before they are read
     // rng is only consumed after a seeded call, but keep the old zeroed state
     // for any filter that reads it first.
     inst->rng.state = (ulong4)(0, 0, 0, 0);
@@ -88,15 +100,32 @@ double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
         // seed goes in first, then the components in reverse, with `pos`
         // tracking the character's position in the full string. Bit-identical
         // to concatenating and hashing; no string is ever built.
-        int total = inst->seed.len;
+        //
+        // The seed part depends on the name only through its length L (the
+        // seed's characters sit at positions L+1..L+len), so the state after
+        // it is cached per L in seedHashByLen. This is most of the hashing on
+        // every path: a filter creating N nodes over D distinct lengths hashes
+        // the seed D times instead of N. Exact; only ph_steps are skipped.
+        int nameLen = 0;
         for (int i = 0; i < num; i++) {
-            total += node_part_len(nts[i], ids[i]);
+            nameLen += node_part_len(nts[i], ids[i]);
         }
-        int pos = total;
-        double h = 1;
-        for (int i = inst->seed.len - 1; i >= 0; i--) {
-            h = ph_step(h, s_char_at(&inst->seed, i), pos--);
+        double h;
+        bool cacheable = nameLen < SEED_HASH_LENS;
+        if (cacheable && ((inst->seedHashValid >> nameLen) & 1UL)) {
+            h = inst->seedHashByLen[nameLen];
+        } else {
+            int pos = nameLen + inst->seed.len;
+            h = 1;
+            for (int i = inst->seed.len - 1; i >= 0; i--) {
+                h = ph_step(h, s_char_at(&inst->seed, i), pos--);
+            }
+            if (cacheable) {
+                inst->seedHashByLen[nameLen] = h;
+                inst->seedHashValid |= 1UL << nameLen;
+            }
         }
+        int pos = nameLen; // the seed's characters counted pos down to here
         for (int i = num - 1; i >= 0; i--) {
             h = ph_node_part_rev(h, &pos, nts[i], ids[i]);
         }

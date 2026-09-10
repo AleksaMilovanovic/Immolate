@@ -818,6 +818,46 @@ Optional. When a filter defines these, Immolate runs two passes instead of one: 
 
 Use this when the per-seed cost of `filter` varies by orders of magnitude, e.g. most seeds fail a cheap early check while a few run a long simulation. In a single pass every lane in a GPU warp waits for the slowest lane, so the rare expensive seeds dominate; the second pass groups the expensive seeds together. Keep `prefilter` itself cheap and uniform. `--single_pass` ignores the prefilter; `--batch` and `--progress` tune the pass-1 batch size and progress output. See `filters/wr_filter.cl` for an example.
 
+### Seed-Supplier Files (--to / --from)
+
+Most searches reject the vast majority of seeds on a cheap early check, and many different filters share the same early check (for example "The Soul appears in the first two antes"). A seed-supplier file stores the seeds that passed such a check so later searches can skip the rest of the pool.
+
+```
+immolate -f early_ante_perkeo -c 1 -n 100000000000 --to soul.seeds
+immolate -f early_ante_perkeo -c 2 --from soul.seeds --to perkeo.seeds
+immolate -f my_filter -c 5 --from perkeo.seeds
+```
+
+`--to <file>` writes the rank of every seed whose `filter` score is at least the `-c` cutoff to `file` instead of printing it. It works with any filter, single-pass or two-pass; with a prefilter, pass 2 does the writing. `--from <file>` reads the seeds from such a file, in chunks of `--batch`, and runs the full `filter` on them; `-n` caps how many seeds are read and `-s` is ignored. A filter's prefilter is skipped under `--from`, because the file is already a list of seeds. `--from` and `--to` combine, so pools can be narrowed in stages; each stage costs a pass over the previous pool only.
+
+`--to_parts <K>` splits the `--to` output into K files named `FILE.part1of<K>` .. `FILE.part<K>of<K>`. The input seeds (the `-n` range, or the source file's seeds under `--from`; the whole pool if `-n` is not given) are cut into K equal slices and each slice's passing seeds go to its own file, so `--to_parts 4 -n 5000` sends the hits from input seeds 1-1250 to part 1, 1251-2500 to part 2, and so on. Every part is a complete supplier file that `--from` accepts on its own, and the parts concatenate to exactly what a single `--to` would have produced. Use it to keep long walks restartable: search each part separately later, or re-run just the range of a part that was lost.
+
+`--resume <part file>` continues a `--to` run that was interrupted. Point it at the part that was being written when the run stopped (or at the single output file of a run without `--to_parts`). The filter, cutoff, output name, part count, start seed and `-n` are all read back from that file, so the only other flag to repeat is `--from` if the original run used one; a conflicting `-f`, `-c`, `-n`, `--to`, `--to_parts` or `--from` on the resume command line is an error rather than a silent override. Immolate scans the file for the last complete seed, discards any partial record a crash left at the end, and restarts the search at the next input seed, appending to the same file and carrying on into the remaining parts. Seeds between the last recorded hit and the crash point are re-examined; they did not pass, so nothing is duplicated, and a resumed file is byte-identical to an uninterrupted one. If the given part was already complete, the run continues with the next part. Every batch is flushed to disk as it is written, so a killed run loses at most the batch in flight and its file needs no repair; a 0-byte part left by a run that died at the instant it created the file is also handled (the settings then come from the command line, so repeat them as for the original run).
+
+```
+immolate -f wr_filter -c 1 --to_parts 24 --to perkeo_full.seeds        (dies during part 12)
+immolate --resume perkeo_full.seeds.part12of24                          (finishes parts 12-24)
+```
+
+`--from` also accepts the base name of a `--to_parts` run: `--from perkeo_full.seeds` reads every finished `perkeo_full.seeds.part*of*` in part order and skips any part that is still being written or was interrupted (with a message naming it), so a pool can be searched while it is still being built. Parts of one run are ascending and contiguous, so the concatenation is a valid sorted stream and `--to` on such a search produces a normal supplier file. `--from` may also be repeated to read an explicit list of files, in the order given.
+
+```
+immolate -f brainstorm_blueprint -c 2 --from perkeo_full.seeds --to bb.seeds   (parts 1-42 of 50 done: reads those)
+```
+
+Seeds are stored as ranks (see `s_from_rank` in `lib/seed.cl`), sorted ascending and delta-coded as LEB128 varints, so a pool that keeps a few percent of seeds costs about one byte per seed: a Soul pool over 100 billion seeds is about 4 GB, a Perkeo pool about 1 GB. The 116-byte header records the filter name, cutoff, range and count; the format is documented in `lib/supplier.h`. Because the walk is in ascending rank order the file is globally sorted, and searches over it print seeds in ascending order too.
+
+A filter run over a pool starts from a fresh instance like any other, so it must reproduce whatever RNG draws the supplier filter made to find its feature; the pool only says which seeds are worth the work. Keep the supplier filter's pack order and ante range in mind when writing the consumer (or call the same helper, such as `pack_has_soul`).
+
+### Filter Cutoff Access
+
+```cl
+#define FILTER_USES_CUTOFF
+long filter(instance* inst, long cutoff) { ... }
+```
+
+Optional. A filter that defines `FILTER_USES_CUTOFF` receives the run's `-c` value as a second argument. Use it to stop early once a seed's score has reached the cutoff, or once it provably cannot, and return what has been counted so far; the search prints or collects the seed by the same `score >= cutoff` test as always. A filter that exits early this way returns a lower bound for passing seeds, not the full count. See `filters/negative_tags.cl`.
+
 ### Fixed Filter Cutoff
 
 `#define FIXED_FILTER_CUTOFF`

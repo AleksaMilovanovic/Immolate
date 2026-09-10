@@ -2,3 +2,5 @@ build
 filters/test.cl
 .kernel_cache/
 test*
+*.seeds
+output/

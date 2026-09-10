@@ -1,5 +1,21 @@
 #include "lib/immolate.h"
+#include "lib/supplier.h"
 #include <time.h>
+
+// Launch a 1-D kernel over numGroups work-groups. If the driver rejects the
+// work-group size for this kernel, halve it once and retry; the new geometry is
+// written back so later launches use it too.
+static cl_int enqueue_1d(cl_command_queue queue, cl_kernel kernel, size_t* globalSize, size_t* localSize, unsigned int numGroups) {
+    cl_int err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, globalSize, localSize, 0, NULL, NULL);
+    if (err == CL_INVALID_WORK_GROUP_SIZE && *localSize > 1) {
+        printf_s("Work-group size %zu rejected by the driver, retrying with %zu.\n", *localSize, *localSize / 2);
+        *localSize /= 2;
+        *globalSize = (size_t)numGroups * *localSize;
+        err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, globalSize, localSize, 0, NULL, NULL);
+    }
+    return err;
+}
+
 int main(int argc, char **argv) {
     
     // Print version
@@ -14,6 +30,15 @@ int main(int argc, char **argv) {
     int singlePass = 0;
     cl_long prefilterBatch = 1 << 26; // 67M seeds per pass-1 batch: 512 MB survivor buffer worst case
     int progressEvery = 0;
+    const char* toFile = NULL;   // --to: write passing seeds to a supplier file
+    const char* fromFile = NULL; // --from: take seeds from a supplier file (first one given; also the "any --from" flag)
+    char* fromFiles[SUP_MAX_FILES]; // every --from given, or the parts discovered from a base name
+    int numFromFiles = 0;
+    int toParts = 1;             // --to_parts: split --to output into this many numbered files
+    const char* resumeFile = NULL; // --resume: continue an interrupted --to run from this part file
+    cl_long forcedStartRank = -1;  // start rank restored from a resumed file's header
+    char resumeBase[MAX_PATH + 64]; // --to path derived from the resumed file's name
+    int resumePart = 1;            // part index parsed from the resumed file's name
     cl_char8 startingSeed;
     for (int i = 0; i < 8; i++) {
         startingSeed.s[i] = '\0';
@@ -23,7 +48,7 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per prefilter batch in a two-pass search. Defaults to 67108864.\n--progress <P>   In a two-pass search, print progress to stderr every P batches. Defaults to off.");
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per prefilter batch in a two-pass search. Defaults to 67108864.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--from <FILE>    Search only the seeds listed in seed-supplier file FILE (made with --to) instead of a rank range. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
             return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
@@ -83,6 +108,24 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i],  "--progress")==0) {
             progressEvery = atoi(argv[i+1]);
+            i++;
+        }
+        if (strcmp(argv[i],  "--to")==0) {
+            toFile = argv[i+1];
+            i++;
+        }
+        if (strcmp(argv[i],  "--from")==0) {
+            if (!fromFile) fromFile = argv[i+1];
+            if (numFromFiles < SUP_MAX_FILES) fromFiles[numFromFiles++] = argv[i+1];
+            i++;
+        }
+        if (strcmp(argv[i],  "--resume")==0) {
+            resumeFile = argv[i+1];
+            i++;
+        }
+        if (strcmp(argv[i],  "--to_parts")==0) {
+            toParts = atoi(argv[i+1]);
+            if (toParts < 1) toParts = 1;
             i++;
         }
         if (strcmp(argv[i],  "--verbose_build")==0) {
@@ -152,6 +195,69 @@ int main(int argc, char **argv) {
             }
             return 0;
         }
+    }
+    // --resume: everything about the run is taken from the interrupted part
+    // file, so it cannot be resumed under different settings by mistake. Any
+    // conflicting flag on this command line is an error, not a silent override.
+    int userFilter = 0, userCutoff = 0, userTo = 0, userParts = 0, userN = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-f") == 0) userFilter = 1;
+        if (strcmp(argv[i], "-c") == 0) userCutoff = 1;
+        if (strcmp(argv[i], "-n") == 0) userN = 1;
+        if (strcmp(argv[i], "--to") == 0) userTo = 1;
+        if (strcmp(argv[i], "--to_parts") == 0) userParts = 1;
+    }
+    static char resumeFilter[64];
+    if (resumeFile) {
+        // Name: <base>[.part<P>of<K>]
+        strcpy_s(resumeBase, sizeof resumeBase, resumeFile);
+        int rParts = 1;
+        resumePart = 1;
+        char* suffix = strrchr(resumeBase, '.');
+        if (suffix && strncmp(suffix, ".part", 5) == 0) {
+            int pp = 0, kk = 0, used = 0;
+            if (sscanf(suffix + 5, "%dof%d%n", &pp, &kk, &used) == 2 && suffix[5 + used] == '\0' && pp >= 1 && kk >= pp) {
+                resumePart = pp;
+                rParts = kk;
+                *suffix = '\0';
+            }
+        }
+        FILE* rf = fopen(resumeFile, "rb");
+        if (!rf) { fprintf_s(stderr, "Cannot open %s to resume.\n", resumeFile); exit(EXIT_FAILURE); }
+        unsigned char hb[SUP_HEADER_SIZE];
+        size_t got = fread(hb, 1, SUP_HEADER_SIZE, rf);
+        fclose(rf);
+        sup_header rh;
+        memset(&rh, 0, sizeof rh);
+        int emptyResume = (got == 0);
+        const char* herr = emptyResume ? NULL : (got == SUP_HEADER_SIZE ? sup_decode_header(hb, &rh) : "file too short for a header");
+        if (herr) { fprintf_s(stderr, "Cannot resume from %s: %s.\n", resumeFile, herr); exit(EXIT_FAILURE); }
+        if (emptyResume) {
+            // Nothing to read settings from: they must come from the command line
+            // (or the defaults), exactly as for the original run.
+            printf_s("%s is a 0-byte file; using the filter, cutoff, range and part count from this command line.\n", resumeFile);
+            strcpy_s(rh.filter, sizeof rh.filter, filter);
+            rh.cutoff = cutoff; rh.start_rank = seed_rank(&startingSeed); rh.num_seeds = numSeeds;
+            rh.flags = fromFile ? SUP_FLAG_FROM_FILE : 0;
+        }
+        if ((rh.flags & SUP_FLAG_FROM_FILE) && !fromFile) { fprintf_s(stderr, "--resume: %s was made from a supplier file (--from); pass the same --from to resume it.\n", resumeFile); exit(EXIT_FAILURE); }
+        if (!(rh.flags & SUP_FLAG_FROM_FILE) && fromFile) { fprintf_s(stderr, "--resume: %s was made from a seed range, not from a supplier file; drop --from to resume it.\n", resumeFile); exit(EXIT_FAILURE); }
+        if (userFilter && strcmp(filter, rh.filter) != 0) { fprintf_s(stderr, "--resume: %s was made with filter %s, not %s.\n", resumeFile, rh.filter, filter); exit(EXIT_FAILURE); }
+        if (userCutoff && cutoff != (cl_long)rh.cutoff) { fprintf_s(stderr, "--resume: %s was made with cutoff %lld, not %lld.\n", resumeFile, (long long)rh.cutoff, (long long)cutoff); exit(EXIT_FAILURE); }
+        if (userTo && strcmp(toFile, resumeBase) != 0) { fprintf_s(stderr, "--resume: %s belongs to output %s, not %s.\n", resumeFile, resumeBase, toFile); exit(EXIT_FAILURE); }
+        if (userParts && toParts != rParts) { fprintf_s(stderr, "--resume: %s is one of %d parts, not %d.\n", resumeFile, rParts, toParts); exit(EXIT_FAILURE); }
+        strcpy_s(resumeFilter, sizeof resumeFilter, rh.filter);
+        filter = resumeFilter;
+        cutoff = (cl_long)rh.cutoff;
+        toFile = resumeBase;
+        toParts = rParts;
+        if (!fromFile) {
+            // Range run: the header holds the original -s rank and -n.
+            if (userN && numSeeds != (cl_long)rh.num_seeds) { fprintf_s(stderr, "--resume: %s covers %lld seeds, not %lld.\n", resumeFile, (long long)rh.num_seeds, (long long)numSeeds); exit(EXIT_FAILURE); }
+            forcedStartRank = (cl_long)rh.start_rank;
+            numSeeds = (cl_long)rh.num_seeds;
+        }
+        printf_s("Resuming %s: filter %s, cutoff %lld, part %d of %d.\n", resumeFile, filter, (long long)cutoff, resumePart, toParts);
     }
     cl_int err;
 
@@ -377,22 +483,34 @@ build_program:
     }
     clErrCheck(err, "clCreateKernel - Creating OpenCL kernel");
 
-    // Filters that define HAS_PREFILTER also get search_prefilter/search_ranks
-    // and run as two passes (see search.cl). Absence of those kernels is the
-    // normal single-pass case, not an error.
-    cl_int errPre = CL_SUCCESS, errRanks = CL_SUCCESS;
+    // search, search_ranks and the two collecting kernels are always present.
+    // search_prefilter exists only when the filter defines HAS_PREFILTER (see
+    // search.cl); its absence is the normal single-pass case, not an error.
+    cl_kernel ranksKernel = clCreateKernel(ssKernelProgram, "search_ranks", &err);
+    clErrCheck(err, "clCreateKernel - Creating search_ranks kernel");
+    cl_kernel collectKernel = clCreateKernel(ssKernelProgram, "search_collect", &err);
+    clErrCheck(err, "clCreateKernel - Creating search_collect kernel");
+    cl_kernel ranksCollectKernel = clCreateKernel(ssKernelProgram, "search_ranks_collect", &err);
+    clErrCheck(err, "clCreateKernel - Creating search_ranks_collect kernel");
+    cl_int errPre = CL_SUCCESS;
     cl_kernel preKernel = clCreateKernel(ssKernelProgram, "search_prefilter", &errPre);
-    cl_kernel ranksKernel = clCreateKernel(ssKernelProgram, "search_ranks", &errRanks);
-    int twoPass = (errPre == CL_SUCCESS && errRanks == CL_SUCCESS && !singlePass);
     if (errPre != CL_SUCCESS) preKernel = NULL;
-    if (errRanks != CL_SUCCESS) ranksKernel = NULL;
+    // A supplier file is already a list of seeds, so --from runs the full filter
+    // on it directly; the prefilter would only add a pass.
+    int twoPass = (preKernel != NULL && !singlePass && fromFile == NULL);
 
-    cl_long startRank = seed_rank(&startingSeed);
+    cl_long startRank = forcedStartRank >= 0 ? forcedStartRank : seed_rank(&startingSeed);
     err = clSetKernelArg(ssKernel, 0, sizeof(startRank), &startRank);
     clErrCheck(err, "clSetKernelArg - Adding starting rank argument");
     err = clSetKernelArg(ssKernel, 1, sizeof(numSeeds), &numSeeds);
     clErrCheck(err, "clSetKernelArg - Adding number of seeds argument");
     err = clSetKernelArg(ssKernel, 2, sizeof(cutoff), &cutoff);
+    clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
+    err = clSetKernelArg(ranksKernel, 2, sizeof(cutoff), &cutoff);
+    clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
+    err = clSetKernelArg(collectKernel, 2, sizeof(cutoff), &cutoff);
+    clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
+    err = clSetKernelArg(ranksCollectKernel, 2, sizeof(cutoff), &cutoff);
     clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
 
     // Launch geometry. Previously globalSize = G*G and localSize = G, so the
@@ -421,97 +539,376 @@ build_program:
     size_t globalSize = (size_t)numGroups * localSize;
     printf_s("Launching %zu work-groups of %zu work-items (%zu total).\n", (size_t)numGroups, localSize, globalSize);
 
+    // Seed-supplier input.
+    sup_multi reader;
+    if (fromFile) {
+        // A single --from is first tried as a --to_parts base name: if any
+        // FILE.part<k>of<K> exist next to it, those are read (finished ones
+        // only) and a plain FILE, if one also exists, is ignored: it can only be
+        // a leftover from another run, since a parts run never writes the base
+        // name. Only when there are no parts is FILE read as a single file.
+        if (numFromFiles == 1) {
+            int K = 0;
+            int found = sup_discover_parts(fromFiles[0], fromFiles + 1, SUP_MAX_FILES - 1, &K);
+            if (found == -1) { fprintf_s(stderr, "%s has part files from runs with different part counts; pass the files explicitly.\n", fromFile); exit(EXIT_FAILURE); }
+            if (found > 0) {
+                FILE* stale = fopen(fromFiles[0], "rb");
+                if (stale) { fclose(stale); printf_s("Note: ignoring %s itself; reading its part files instead.\n", fromFile); }
+                for (int i = 0; i < found; i++) fromFiles[i] = fromFiles[i + 1];
+                numFromFiles = found;
+                printf_s("%s: found %d of %d parts.\n", fromFile, found, K);
+            } else {
+                FILE* probe = fopen(fromFiles[0], "rb");
+                if (!probe) { fprintf_s(stderr, "Cannot read seed-supplier file %s: no such file and no %s.part*of* files.\n", fromFile, fromFile); exit(EXIT_FAILURE); }
+                fclose(probe);
+            }
+        }
+        const char* rerr = sup_multi_open(&reader, fromFiles, numFromFiles);
+        if (rerr) {
+            fprintf_s(stderr, "Cannot read seed-supplier file %s: %s.\n", fromFile, rerr);
+            exit(EXIT_FAILURE);
+        }
+        if (reader.num_paths == 1) printf_s("Reading %llu seeds from %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.paths[0], reader.header.filter, (long long)reader.header.cutoff);
+        else printf_s("Reading %llu seeds from %d files, %s .. %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.num_paths, reader.paths[0], reader.paths[reader.num_paths - 1], reader.header.filter, (long long)reader.header.cutoff);
+    }
+    // Seed-supplier output. Opened before the search so a bad path fails fast.
+    // The header's range is the rank range the pool descends from: under --from
+    // that is the source file's range, not this run's -s/-n.
+    //
+    // With --to_parts K the input seeds (the -n range, or the file's count) are
+    // cut into K equal slices and slice k's hits go to FILE.part<k>of<K>. Each
+    // batch is clamped to end at a slice boundary, so a part switch only ever
+    // happens between batches and every file stays sorted and self-contained.
+    sup_writer writer;
+    cl_long resumedFrom = 0;  // input index this run started at (--resume)
+    cl_long hdrStart = 0, hdrNum = 0;
+    uint32_t hdrFlags = 0;
+    cl_long partInputs = 0;   // input seeds per part
+    cl_long partEnd = 0;      // input count at which the current part ends
+    int partIndex = 0;        // 1-based part currently open
+    char partPath[MAX_PATH + 64];
+    if (toFile) {
+        hdrStart = fromFile ? (cl_long)reader.header.start_rank : startRank;
+        hdrNum = fromFile ? (cl_long)reader.header.num_seeds : numSeeds;
+        hdrFlags = fromFile ? SUP_FLAG_FROM_FILE : 0;
+        cl_long inputs = numSeeds;
+        if (fromFile && (cl_long)reader.header.count < inputs) inputs = (cl_long)reader.header.count;
+        if ((cl_long)toParts > inputs) {
+            printf_s("--to_parts %d exceeds the %lld input seeds; using %lld parts.\n", toParts, (long long)inputs, (long long)inputs);
+            toParts = (int)inputs;
+            if (toParts < 1) toParts = 1;
+        }
+        partInputs = (inputs + toParts - 1) / toParts; // ceil: the last part is the short one
+        partIndex = 1;
+        partEnd = toParts == 1 ? inputs : partInputs;
+        if (toParts == 1) strcpy_s(partPath, sizeof partPath, toFile);
+        else snprintf(partPath, sizeof partPath, "%s.part%dof%d", toFile, partIndex, toParts);
+        if (resumeFile) {
+            // Reopen the interrupted part and find where to pick up. The file
+            // holds hits, not inputs, so the exact input the run died on is
+            // unknown; restarting just after the last hit re-examines a few
+            // seeds that did not pass, which write nothing, so no duplicates.
+            partIndex = resumePart;
+            partEnd = partIndex == toParts ? inputs : (cl_long)partIndex * partInputs;
+            cl_long partStart = (cl_long)(partIndex - 1) * partInputs;
+            sup_header rh;
+            int64_t lastRank = -1;
+            int complete = 0;
+            const char* rerr = sup_writer_reopen(&writer, resumeFile, &rh, &lastRank, &complete);
+            int emptyPart = rerr && strcmp(rerr, "empty") == 0;
+            if (rerr && !emptyPart) { fprintf_s(stderr, "Cannot resume from %s: %s.\n", resumeFile, rerr); exit(EXIT_FAILURE); }
+            if (emptyPart) {
+                printf_s("%s is empty (the previous run died before writing it); starting it from the beginning of its range.\n", resumeFile);
+                lastRank = -1; // falls through to the positioning code below, which skips to partStart
+                if (!sup_writer_open(&writer, resumeFile, filter, cutoff, hdrStart, hdrNum, hdrFlags)) {
+                    fprintf_s(stderr, "Cannot open %s for writing.\n", resumeFile);
+                    exit(EXIT_FAILURE);
+                }
+                rh.start_rank = hdrStart; rh.num_seeds = hdrNum; rh.flags = hdrFlags;
+            }
+            if (fromFile && ((cl_long)rh.start_rank != hdrStart || (cl_long)rh.num_seeds != hdrNum)) {
+                fprintf_s(stderr, "--resume: %s descends from a different source than %s (range %lld+%lld vs %lld+%lld).\n",
+                          resumeFile, fromFile, (long long)rh.start_rank, (long long)rh.num_seeds, (long long)hdrStart, (long long)hdrNum);
+                exit(EXIT_FAILURE);
+            }
+            strcpy_s(partPath, sizeof partPath, resumeFile);
+            cl_long resumeAt; // input index to continue from
+            if (complete) {
+                printf_s("%s is complete (%llu seeds).\n", resumeFile, (unsigned long long)writer.count);
+                sup_writer_close(&writer);
+                if (partIndex >= toParts) {
+                    printf_s("That was the last part; nothing to resume.\n");
+                    return EXIT_SUCCESS;
+                }
+                partIndex++;
+                partEnd = partIndex == toParts ? inputs : (cl_long)partIndex * partInputs;
+                partStart = (cl_long)(partIndex - 1) * partInputs;
+                resumeAt = partStart;
+                if (fromFile) {
+                    // The source reader is at the start of the pool; advance it to
+                    // this part's first input seed so the new part covers its own
+                    // slice rather than re-searching the pool from the beginning.
+                    cl_long skipped = 0;
+                    int64_t scratch[4096];
+                    while (skipped < partStart) {
+                        size_t want = (size_t)(partStart - skipped) < 4096 ? (size_t)(partStart - skipped) : 4096;
+                        size_t g = sup_multi_next(&reader, scratch, want);
+                        if (g == 0) break;
+                        skipped += (cl_long)g;
+                    }
+                    if (skipped != partStart) {
+                        fprintf_s(stderr, "--resume: source has only %lld seeds, but part %d starts at %lld.\n", (long long)skipped, partIndex, (long long)partStart);
+                        exit(EXIT_FAILURE);
+                    }
+                }
+                snprintf(partPath, sizeof partPath, "%s.part%dof%d", toFile, partIndex, toParts);
+                if (!sup_writer_open(&writer, partPath, filter, cutoff, hdrStart, hdrNum, hdrFlags)) {
+                    fprintf_s(stderr, "Cannot open %s for writing.\n", partPath);
+                    exit(EXIT_FAILURE);
+                }
+                printf_s("Starting %s.\n", partPath);
+            } else if (fromFile) {
+                // Position the source after the last hit, but no earlier than the part's start.
+                uint64_t skipped = lastRank >= 0 ? sup_multi_skip_through(&reader, lastRank) : 0;
+                while ((cl_long)skipped < partStart) {
+                    int64_t scratch[4096];
+                    size_t want = (size_t)(partStart - (cl_long)skipped) < 4096 ? (size_t)(partStart - (cl_long)skipped) : 4096;
+                    size_t g = sup_multi_next(&reader, scratch, want);
+                    if (g == 0) break;
+                    skipped += g;
+                }
+                resumeAt = (cl_long)skipped;
+            } else {
+                resumeAt = lastRank >= 0 ? lastRank + 1 - startRank : partStart;
+                if (resumeAt < partStart) resumeAt = partStart;
+            }
+            if (resumeAt > partEnd) {
+                fprintf_s(stderr, "--resume: %s holds seeds beyond its own part's range; wrong part number or -n?\n", resumeFile);
+                exit(EXIT_FAILURE);
+            }
+            resumedFrom = resumeAt;
+            printf_s("Continuing %s (%llu seeds so far) from input seed %lld of %lld; part ends at %lld.\n",
+                     partPath, (unsigned long long)writer.count, (long long)resumeAt, (long long)inputs, (long long)partEnd);
+        } else {
+            if (!sup_writer_open(&writer, partPath, filter, cutoff, hdrStart, hdrNum, hdrFlags)) {
+                fprintf_s(stderr, "Cannot open %s for writing.\n", partPath);
+                exit(EXIT_FAILURE);
+            }
+            if (toParts == 1) printf_s("Writing seeds scoring at least %lld to %s.\n", (long long)cutoff, toFile);
+            else printf_s("Writing seeds scoring at least %lld to %s.part1of%d .. part%dof%d, %lld input seeds each.\n",
+                          (long long)cutoff, toFile, toParts, toParts, toParts, (long long)partInputs);
+        }
+    }
+
     // Execute OpenCL kernel
     printf_s("Starting searcher...\n");
+    fflush(stdout);
     clock_t begin = clock();
-    if (!twoPass) {
-        err = clEnqueueNDRangeKernel(queue, ssKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
-        if (err == CL_INVALID_WORK_GROUP_SIZE && localSize > 1) {
-            // The driver rejected the group size for this kernel. Halve it and retry.
-            printf_s("Work-group size %zu rejected by the driver, retrying with %zu.\n", localSize, localSize / 2);
-            localSize /= 2;
-            globalSize = (size_t)numGroups * localSize;
-            err = clEnqueueNDRangeKernel(queue, ssKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
-        }
+    if (!twoPass && !toFile && !fromFile) {
+        // Plain single pass: print straight from the kernel.
+        err = enqueue_1d(queue, ssKernel, &globalSize, &localSize, numGroups);
         clErrCheck(err, "clEnqueueNDRangeKernel - Executing OpenCL kernel");
         err = clFlush(queue);
         err = clFinish(queue);
     } else {
-        // Two-pass search. Pass 1 runs the prefilter over a batch of seeds and
-        // appends survivors' ranks to a device buffer; pass 2 runs the full
-        // filter on that packed list. The survivor buffer is sized to hold every
-        // seed of a batch, so the kernel can never overflow it regardless of the
-        // prefilter's pass rate; the batch size is what bounds the memory.
+        // Batched search. Seeds come from a rank range (walked in batches of
+        // --batch) or from a supplier file (decoded in chunks); passing seeds go
+        // to stdout or, with --to, are read back and appended to the file.
+        // `listBuf` holds the packed rank list feeding a pass; `outBuf` and
+        // `countBuf` receive a collecting kernel's hits. Both are sized to hold
+        // every seed of a batch, so the kernels can never overflow them.
         const cl_long batchSeeds = prefilterBatch;
-        cl_mem survivorsBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_long) * (size_t)batchSeeds, NULL, &err);
-        clErrCheck(err, "clCreateBuffer - Creating survivor buffer");
+        cl_mem listBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_long) * (size_t)batchSeeds, NULL, &err);
+        clErrCheck(err, "clCreateBuffer - Creating rank list buffer");
+        cl_mem outBuf = NULL;
+        if (toFile || twoPass) {
+            // Two-pass writes pass-1 survivors to listBuf and pass-2 hits to outBuf;
+            // --to needs outBuf for the hits.
+            outBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_long) * (size_t)batchSeeds, NULL, &err);
+            clErrCheck(err, "clCreateBuffer - Creating output buffer");
+        }
         cl_mem countBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), NULL, &err);
-        clErrCheck(err, "clCreateBuffer - Creating survivor count buffer");
-        err = clSetKernelArg(preKernel, 2, sizeof(cl_mem), &survivorsBuf);
-        clErrCheck(err, "clSetKernelArg - Adding survivor buffer argument");
-        err = clSetKernelArg(preKernel, 3, sizeof(cl_mem), &countBuf);
-        clErrCheck(err, "clSetKernelArg - Adding survivor count argument");
-        err = clSetKernelArg(ranksKernel, 0, sizeof(cl_mem), &survivorsBuf);
+        clErrCheck(err, "clCreateBuffer - Creating count buffer");
+        cl_long* hostRanks = NULL; // staging for file <-> device transfers
+        if (toFile || fromFile) {
+            hostRanks = (cl_long*)malloc(sizeof(cl_long) * (size_t)batchSeeds);
+            if (!hostRanks) { fprintf_s(stderr, "Out of memory for a %lld-seed batch; lower --batch.\n", (long long)batchSeeds); exit(EXIT_FAILURE); }
+        }
+        // Pass 1 (prefilter) reads a range, writes survivors to listBuf.
+        if (twoPass) {
+            err = clSetKernelArg(preKernel, 2, sizeof(cl_mem), &listBuf);
+            clErrCheck(err, "clSetKernelArg - Adding survivor buffer argument");
+            err = clSetKernelArg(preKernel, 3, sizeof(cl_mem), &countBuf);
+            clErrCheck(err, "clSetKernelArg - Adding survivor count argument");
+        }
+        // Range collect reads a range, writes hits to outBuf or listBuf.
+        cl_mem collectOut = toFile ? outBuf : listBuf;
+        err = clSetKernelArg(collectKernel, 3, sizeof(cl_mem), &collectOut);
+        clErrCheck(err, "clSetKernelArg - Adding collect output argument");
+        err = clSetKernelArg(collectKernel, 4, sizeof(cl_mem), &countBuf);
+        clErrCheck(err, "clSetKernelArg - Adding collect count argument");
+        // List kernels read listBuf; the collecting one writes hits to outBuf.
+        err = clSetKernelArg(ranksKernel, 0, sizeof(cl_mem), &listBuf);
         clErrCheck(err, "clSetKernelArg - Adding ranks buffer argument");
-        err = clSetKernelArg(ranksKernel, 2, sizeof(cutoff), &cutoff);
-        clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
-        printf_s("Two-pass search: prefilter in batches of %lld seeds.\n", (long long)batchSeeds);
+        err = clSetKernelArg(ranksCollectKernel, 0, sizeof(cl_mem), &listBuf);
+        clErrCheck(err, "clSetKernelArg - Adding ranks buffer argument");
+        if (outBuf) {
+            err = clSetKernelArg(ranksCollectKernel, 3, sizeof(cl_mem), &outBuf);
+            clErrCheck(err, "clSetKernelArg - Adding ranks collect output argument");
+        }
+        err = clSetKernelArg(ranksCollectKernel, 4, sizeof(cl_mem), &countBuf);
+        clErrCheck(err, "clSetKernelArg - Adding ranks collect count argument");
 
-        cl_long totalSurvivors = 0;
+        if (fromFile) printf_s("Searching seeds from file in chunks of %lld.\n", (long long)batchSeeds);
+        else if (twoPass) printf_s("Two-pass search: prefilter in batches of %lld seeds.\n", (long long)batchSeeds);
+        else printf_s("Collecting search in batches of %lld seeds.\n", (long long)batchSeeds);
+
+        cl_long totalIn = resumedFrom; // input index reached (seeds examined, plus any skipped by --resume)
+        cl_long totalSurvivors = 0; // pass-1 survivors (two-pass only)
+        cl_long totalOut = 0;       // seeds written to --to
         int batches = 0;
-        for (cl_long done = 0; done < numSeeds; done += batchSeeds) {
-            cl_long thisBatch = numSeeds - done < batchSeeds ? numSeeds - done : batchSeeds;
-            cl_long batchStart = startRank + done;
-            cl_uint zero = 0;
-            err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
-            clErrCheck(err, "clEnqueueWriteBuffer - Resetting survivor count");
-            err = clSetKernelArg(preKernel, 0, sizeof(batchStart), &batchStart);
-            clErrCheck(err, "clSetKernelArg - Adding batch start rank");
-            err = clSetKernelArg(preKernel, 1, sizeof(thisBatch), &thisBatch);
-            clErrCheck(err, "clSetKernelArg - Adding batch size");
-            err = clEnqueueNDRangeKernel(queue, preKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
-            if (err == CL_INVALID_WORK_GROUP_SIZE && localSize > 1) {
-                printf_s("Work-group size %zu rejected by the driver, retrying with %zu.\n", localSize, localSize / 2);
-                localSize /= 2;
-                globalSize = (size_t)numGroups * localSize;
-                err = clEnqueueNDRangeKernel(queue, preKernel, 1, NULL, &globalSize, &localSize, 0, NULL, NULL);
+        const cl_uint zero = 0;
+        for (;;) {
+            // ---- Source: fill either a range or listBuf for this batch ----
+            cl_long thisBatch = 0;   // range size, or list length
+            cl_long batchStart = 0;
+            int haveList = 0;        // seeds for this batch are in listBuf
+            // Never read past the end of the current output part.
+            cl_long batchCap = batchSeeds;
+            if (toFile && partEnd - totalIn < batchCap) batchCap = partEnd - totalIn;
+            if (fromFile) {
+                if (totalIn >= numSeeds) break;
+                size_t want = (size_t)(numSeeds - totalIn < batchCap ? numSeeds - totalIn : batchCap);
+                size_t got = sup_multi_next(&reader, (int64_t*)hostRanks, want);
+                if (got == 0) break;
+                thisBatch = (cl_long)got;
+                err = clEnqueueWriteBuffer(queue, listBuf, CL_TRUE, 0, sizeof(cl_long) * got, hostRanks, 0, NULL, NULL);
+                clErrCheck(err, "clEnqueueWriteBuffer - Uploading seed list chunk");
+                haveList = 1;
+            } else {
+                if (totalIn >= numSeeds) break;
+                thisBatch = numSeeds - totalIn < batchCap ? numSeeds - totalIn : batchCap;
+                batchStart = startRank + totalIn;
+                if (twoPass) {
+                    err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
+                    clErrCheck(err, "clEnqueueWriteBuffer - Resetting survivor count");
+                    err = clSetKernelArg(preKernel, 0, sizeof(batchStart), &batchStart);
+                    clErrCheck(err, "clSetKernelArg - Adding batch start rank");
+                    err = clSetKernelArg(preKernel, 1, sizeof(thisBatch), &thisBatch);
+                    clErrCheck(err, "clSetKernelArg - Adding batch size");
+                    err = enqueue_1d(queue, preKernel, &globalSize, &localSize, numGroups);
+                    clErrCheck(err, "clEnqueueNDRangeKernel - Executing prefilter kernel");
+                    cl_uint survivors = 0;
+                    err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(survivors), &survivors, 0, NULL, NULL);
+                    clErrCheck(err, "clEnqueueReadBuffer - Reading survivor count");
+                    totalSurvivors += survivors;
+                    totalIn += thisBatch;
+                    thisBatch = survivors;
+                    haveList = 1;
+                }
             }
-            clErrCheck(err, "clEnqueueNDRangeKernel - Executing prefilter kernel");
 
-            cl_uint survivors = 0;
-            err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(survivors), &survivors, 0, NULL, NULL);
-            clErrCheck(err, "clEnqueueReadBuffer - Reading survivor count");
-            totalSurvivors += survivors;
+            // ---- Filter: run over the range or the list, print or collect ----
+            cl_uint hits = 0;
+            if (haveList) {
+                if (thisBatch > 0) {
+                    cl_kernel k = toFile ? ranksCollectKernel : ranksKernel;
+                    err = clSetKernelArg(k, 1, sizeof(thisBatch), &thisBatch);
+                    clErrCheck(err, "clSetKernelArg - Adding number of ranks");
+                    if (toFile) {
+                        err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
+                        clErrCheck(err, "clEnqueueWriteBuffer - Resetting hit count");
+                    }
+                    // The list is short compared with a batch; do not launch more lanes than there is work.
+                    size_t listGroups = ((size_t)thisBatch + localSize - 1) / localSize;
+                    if (listGroups > (size_t)numGroups) listGroups = numGroups;
+                    size_t listGlobal = listGroups * localSize;
+                    err = clEnqueueNDRangeKernel(queue, k, 1, NULL, &listGlobal, &localSize, 0, NULL, NULL);
+                    clErrCheck(err, "clEnqueueNDRangeKernel - Executing ranks kernel");
+                    if (toFile) {
+                        err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
+                        clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
+                    } else {
+                        err = clFinish(queue);
+                        clErrCheck(err, "clFinish - Waiting for ranks kernel");
+                    }
+                }
+                if (fromFile) totalIn += thisBatch;
+            } else {
+                // Range, collecting (single pass with --to).
+                err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
+                clErrCheck(err, "clEnqueueWriteBuffer - Resetting hit count");
+                err = clSetKernelArg(collectKernel, 0, sizeof(batchStart), &batchStart);
+                clErrCheck(err, "clSetKernelArg - Adding batch start rank");
+                err = clSetKernelArg(collectKernel, 1, sizeof(thisBatch), &thisBatch);
+                clErrCheck(err, "clSetKernelArg - Adding batch size");
+                err = enqueue_1d(queue, collectKernel, &globalSize, &localSize, numGroups);
+                clErrCheck(err, "clEnqueueNDRangeKernel - Executing collect kernel");
+                err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
+                clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
+                totalIn += thisBatch;
+            }
+
+            // ---- Sink: append this batch's hits to the supplier file ----
+            if (toFile && hits > 0) {
+                err = clEnqueueReadBuffer(queue, outBuf, CL_TRUE, 0, sizeof(cl_long) * hits, hostRanks, 0, NULL, NULL);
+                clErrCheck(err, "clEnqueueReadBuffer - Reading collected ranks");
+                if (!sup_writer_append(&writer, (int64_t*)hostRanks, hits)) {
+                    fprintf_s(stderr, "Failed writing to %s.\n", toFile);
+                    exit(EXIT_FAILURE);
+                }
+                totalOut += hits;
+            }
+            // Part boundary reached: close this part and open the next.
+            if (toFile && toParts > 1 && totalIn >= partEnd && totalIn < numSeeds && partIndex < toParts) {
+                if (!sup_writer_close(&writer)) {
+                    fprintf_s(stderr, "Failed closing %s.\n", partPath);
+                    exit(EXIT_FAILURE);
+                }
+                printf_s("Finished %s: %llu seeds.\n", partPath, (unsigned long long)writer.count);
+                fflush(stdout);
+                partIndex++;
+                partEnd += partInputs;
+                snprintf(partPath, sizeof partPath, "%s.part%dof%d", toFile, partIndex, toParts);
+                if (!sup_writer_open(&writer, partPath, filter, cutoff, hdrStart, hdrNum, hdrFlags)) {
+                    fprintf_s(stderr, "Cannot open %s for writing.\n", partPath);
+                    exit(EXIT_FAILURE);
+                }
+            }
             batches++;
-
-            if (survivors > 0) {
-                cl_long numRanks = survivors;
-                err = clSetKernelArg(ranksKernel, 1, sizeof(numRanks), &numRanks);
-                clErrCheck(err, "clSetKernelArg - Adding number of ranks");
-                // Survivors are few; do not launch more lanes than there is work.
-                size_t ranksGroups = ((size_t)survivors + localSize - 1) / localSize;
-                if (ranksGroups > (size_t)numGroups) ranksGroups = numGroups;
-                size_t ranksGlobal = ranksGroups * localSize;
-                err = clEnqueueNDRangeKernel(queue, ranksKernel, 1, NULL, &ranksGlobal, &localSize, 0, NULL, NULL);
-                clErrCheck(err, "clEnqueueNDRangeKernel - Executing ranks kernel");
-                err = clFinish(queue);
-                clErrCheck(err, "clFinish - Waiting for ranks kernel");
-            }
             if (progressEvery > 0 && batches % progressEvery == 0) {
                 double elapsed = (double)(clock() - begin) / CLOCKS_PER_SEC;
-                fprintf(stderr, "[%lld / %lld seeds, %lld survivors, %.1fs]\n",
-                        (long long)(done + thisBatch), (long long)numSeeds, (long long)totalSurvivors, elapsed);
+                if (twoPass) fprintf(stderr, "[%lld / %lld seeds, %lld survivors, %lld written, %.1fs]\n",
+                        (long long)totalIn, (long long)numSeeds, (long long)totalSurvivors, (long long)totalOut, elapsed);
+                else fprintf(stderr, "[%lld seeds, %lld written, %.1fs]\n", (long long)totalIn, (long long)totalOut, elapsed);
+                fflush(stderr);
             }
         }
         err = clFinish(queue);
-        printf_s("Prefilter passed %lld of %lld seeds.\n", (long long)totalSurvivors, (long long)numSeeds);
-        clReleaseMemObject(survivorsBuf);
+        if (twoPass) printf_s("Prefilter passed %lld of %lld seeds.\n", (long long)totalSurvivors, (long long)totalIn);
+        if (fromFile) printf_s("Searched %lld seeds from %s.\n", (long long)totalIn, fromFile);
+        if (toFile) {
+            if (!sup_writer_close(&writer)) {
+                fprintf_s(stderr, "Failed closing %s.\n", partPath);
+                exit(EXIT_FAILURE);
+            }
+            if (toParts > 1) printf_s("Finished %s: %llu seeds.\n", partPath, (unsigned long long)writer.count);
+            if (resumedFrom > 0) printf_s("This run examined %lld seeds and wrote %lld.\n", (long long)(totalIn - resumedFrom), (long long)totalOut);
+            else if (toParts > 1) printf_s("Wrote %lld of %lld seeds to %d files %s.part1of%d .. part%dof%d.\n", (long long)totalOut, (long long)totalIn, partIndex, toFile, toParts, partIndex, toParts);
+            else printf_s("Wrote %lld of %lld seeds to %s.\n", (long long)totalOut, (long long)totalIn, toFile);
+        }
+        if (fromFile) sup_multi_close(&reader);
+        free(hostRanks);
+        clReleaseMemObject(listBuf);
+        if (outBuf) clReleaseMemObject(outBuf);
         clReleaseMemObject(countBuf);
     }
 
     // Clean up
     if (preKernel) clReleaseKernel(preKernel);
-    if (ranksKernel) clReleaseKernel(ranksKernel);
+    clReleaseKernel(ranksKernel);
+    clReleaseKernel(collectKernel);
+    clReleaseKernel(ranksCollectKernel);
     err = clReleaseKernel(ssKernel);
     err = clReleaseProgram(ssKernelProgram);
     err = clReleaseCommandQueue(queue);

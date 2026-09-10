@@ -94,9 +94,25 @@ void s_print(seed* s) {
     text s_str = s_to_string(s);
     printf("%s",s_str.str);
 }
-void s_print_rank(seed* s, long rank) {
+// Print "SEED (score)". NVIDIA's OpenCL printf treats %li / %ld as 32-bit: on
+// an RTX 5080 the 12-digit score 721353209655 printed as -201296073, its low
+// 32 bits. So the value is printed through 32-bit pieces (up to three 9-digit
+// groups) instead, which is exact for every 64-bit long on every platform.
+void s_print_score(seed* s, long score) {
     text s_str = s_to_string(s);
-    printf("%s (%li)\n",s_str.str,rank);
+    char sign[2];
+    sign[0] = score < 0 ? '-' : '\0';
+    sign[1] = '\0';
+    ulong mag = score < 0 ? (ulong)(-(score + 1)) + 1UL : (ulong)score; // no overflow at LONG_MIN
+    uint hi = (uint)(mag / 1000000000000000000UL);
+    uint mid = (uint)((mag / 1000000000UL) % 1000000000UL);
+    uint lo = (uint)(mag % 1000000000UL);
+    if (hi) printf("%s (%s%u%09u%09u)\n", s_str.str, sign, hi, mid, lo);
+    else if (mid) printf("%s (%s%u%09u)\n", s_str.str, sign, mid, lo);
+    else printf("%s (%s%u)\n", s_str.str, sign, lo);
+}
+void s_print_rank(seed* s, long rank) {
+    s_print_score(s, rank);
 }
 void s_next(seed* s) {
     s->data[s->len-1] = (s->data[s->len-1]+1)%NUM_CHARS;
