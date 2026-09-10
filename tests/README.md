@@ -37,6 +37,9 @@ python3 tests/run.py --profile breadth
 
 # Timing corpus only
 python3 tests/run.py --profile benchmark
+
+# Guarded RNG recurrence validation and paired timings only
+python3 tests/run.py --profile rng-advance
 ```
 
 Select a non-default OpenCL device with:
@@ -48,6 +51,24 @@ python3 tests/run.py --platform 0 --device 1
 `--scale auto` selects the RTX profile only when the chosen device identifies itself as an RTX 5080. Other devices use conservative PoCL-sized benchmark cases unless `--scale rtx5080` is supplied explicitly.
 
 PoCL is useful for correctness and OpenCL compiler coverage. Its timings are not representative of the RTX 5080.
+
+## Guarded recurrence prototype
+
+The isolated integer RNG-node prototype can be validated on the host with:
+
+```bash
+python3 tests/rng_advance.py
+```
+
+This checks directed boundary states, long native trajectories, one million deterministic samples, and the exact corpus used by `rng_advance_validate`. It fails on any guard-accepted mismatch and reports the fallback rate. The compact suite also runs the OpenCL corpus against a host-generated exact golden.
+
+The paired `bench_rng_advance_native` and `bench_rng_advance_hybrid` cases are included in the normal benchmark profile. The dedicated `rng-advance` profile runs only the OpenCL validator and this pair, then prints the hybrid/native timing ratio. They use identical starting states, 512 transitions per seed, and observable output conversion. The prototype does not change production `rng_node_advance`.
+
+For the RTX decision run:
+
+```bash
+python3 tests/run.py --profile rng-advance --scale rtx5080 --repeat 7
+```
 
 ## Correctness baselines
 

@@ -576,7 +576,7 @@ int main(int argc, char **argv) {
         char src_path[MAX_PATH + 64];
         snprintf(src_path, sizeof src_path, "%s%sfilters%s%s.cl", executable_dir, PATH_SEPARATOR, PATH_SEPARATOR, filter);
         h = fnv1a_file(h, src_path, &ok);
-        static const char* libFiles[] = {"immolate.cl", "util.cl", "seed.cl", "items.cl", "debug.cl", "cache.cl", "instance.cl", "functions.cl"};
+        static const char* libFiles[] = {"immolate.cl", "util.cl", "seed.cl", "items.cl", "debug.cl", "cache.cl", "instance.cl", "functions.cl", "rng_advance_int.cl"};
         for (size_t i = 0; i < sizeof(libFiles) / sizeof(libFiles[0]); i++) {
             snprintf(src_path, sizeof src_path, "%s%slib%s%s", executable_dir, PATH_SEPARATOR, PATH_SEPARATOR, libFiles[i]);
             h = fnv1a_file(h, src_path, &ok);

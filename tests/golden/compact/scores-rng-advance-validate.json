@@ -1,0 +1,54 @@
+{
+  "algorithm": "sha256",
+  "block_size": 512,
+  "blocks": [
+    {
+      "count": 512,
+      "sha256": "f9b431cff0c5ed799f14450d4a2c4cc3af3aeb4f5adaefa3d4ac22b9983ebafd",
+      "start_rank": 0
+    },
+    {
+      "count": 512,
+      "sha256": "968df3970f561a6981d44ab81ea7d5fc71f56a226c08e2f8555a3ff0cb673604",
+      "start_rank": 512
+    },
+    {
+      "count": 512,
+      "sha256": "39fb5f0ed8ba76c6b9b29ba1e58a391fbf2229a26ad4f11f318138baf75c79f9",
+      "start_rank": 1024
+    },
+    {
+      "count": 512,
+      "sha256": "71e9e6e2ab31b4707d2d6f5dbcbe51bdc1456f701d52b14e559e58a563890cfa",
+      "start_rank": 1536
+    },
+    {
+      "count": 512,
+      "sha256": "9e24089a47b109204468c0f9e26440330e64563986fae0f933c8a36f96ddd031",
+      "start_rank": 2048
+    },
+    {
+      "count": 512,
+      "sha256": "1b9c9edf0456d93a7f9c2d97b2815498ce524936e1eb745eafda2fba5dba0ca2",
+      "start_rank": 2560
+    },
+    {
+      "count": 512,
+      "sha256": "cc2a0dfc961f7fb843b57fb1a06f87dc2f64b5135ee196e656d368d93de1e59c",
+      "start_rank": 3072
+    },
+    {
+      "count": 512,
+      "sha256": "f1b7d13fdc59433ca1425fd7134725593bc7eeaab91dda37cbcc96c4f768df09",
+      "start_rank": 3584
+    }
+  ],
+  "case_id": "scores-rng-advance-validate",
+  "case_sha256": "76bc1403f128eeb9300eae49778abba96f03fe80befb3f972097ee11b29292c3",
+  "count": 4096,
+  "filter": "rng_advance_validate",
+  "format": "immolate-score-hashes-v1",
+  "start_rank": 0,
+  "type": "score_hashes",
+  "whole_sha256": "02273f512a752d351a48edad603794928187b04cc6b3f4de16c7571c52909ae8"
+}

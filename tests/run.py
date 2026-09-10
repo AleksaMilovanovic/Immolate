@@ -43,7 +43,7 @@ class CaseFailure(RuntimeError):
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("smoke", "quick", "correctness", "breadth", "benchmark", "all"), default="all")
+    parser.add_argument("--profile", choices=("smoke", "quick", "correctness", "breadth", "benchmark", "rng-advance", "all"), default="all")
     parser.add_argument("--scale", choices=("auto", "pocl", "rtx5080"), default="auto")
     parser.add_argument("--platform", type=int, default=0)
     parser.add_argument("--device", type=int, default=0)
@@ -406,6 +406,11 @@ def summary_text(summary: dict) -> str:
         timing = case.get("median_seconds")
         timing_text = "" if timing is None else f"  {timing:.6f}s median"
         lines.append(f"[{marker}] {case['id']}{timing_text}  {case['message']}")
+    for comparison in summary.get("timing_comparisons", []):
+        lines.append(
+            f"[RATIO] {comparison['id']} / {comparison['baseline_id']}: "
+            f"{comparison['ratio']:.3f}x"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -514,12 +519,30 @@ def main(argv: list[str] | None = None) -> int:
                 "median_seconds": median,
             })
 
+        summaries_by_id = {case["id"]: case for case in case_summaries}
+        timing_comparisons = []
+        for case in selected_cases:
+            baseline_id = case.get("compare_to")
+            if not baseline_id:
+                continue
+            current = summaries_by_id.get(case["id"])
+            baseline = summaries_by_id.get(baseline_id)
+            current_median = current.get("median_seconds") if current else None
+            baseline_median = baseline.get("median_seconds") if baseline else None
+            if current_median is not None and baseline_median:
+                timing_comparisons.append({
+                    "id": case["id"],
+                    "baseline_id": baseline_id,
+                    "ratio": current_median / baseline_median,
+                })
+
         summary = {
             "format": "immolate-suite-summary-v1",
             "profile": args.profile,
             "scale": scale,
             "passed": all(case["passed"] for case in case_summaries),
             "cases": case_summaries,
+            "timing_comparisons": timing_comparisons,
         }
         write_json(results / "summary.json", summary)
         text = summary_text(summary)
