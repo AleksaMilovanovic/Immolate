@@ -228,6 +228,15 @@
       "cutoff": 9223372036854775807
     },
     {
+      "id": "benchmark-deep-rarity-shops",
+      "kind": "benchmark",
+      "tags": ["benchmark_extended"],
+      "filter": "deep_rarity_shops",
+      "seed": "11111111",
+      "count": {"pocl": 2048, "rtx5080": 2048},
+      "cutoff": 9223372036854775807
+    },
+    {
       "id": "benchmark-pack",
       "kind": "benchmark",
       "tags": ["benchmark_extended"],
