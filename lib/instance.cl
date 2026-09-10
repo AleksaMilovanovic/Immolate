@@ -86,8 +86,8 @@ double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
     // The (type, value) pairs and the depth are packed into one 64-bit key, so
     // the lookup is a single compare per cached node instead of a nested loop.
     ulong key = node_key(nts, ids, num);
-    // Check if node exists
-    for (int i = 0; i < inst->rngCache.nextFreeNode; i++) {
+    // Recent node streams are usually reused first within the current ante.
+    for (int i = inst->rngCache.nextFreeNode - 1; i >= 0; i--) {
         if (inst->rngCache.nodes[i].key == key) {
             node_id = i;
             break;

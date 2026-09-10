@@ -24,6 +24,55 @@ Build:
 Run:
 `.\build\Release\Immolate.exe`
 
+### macOS
+
+Apple GPUs cannot run the fp64 OpenCL kernels required by Immolate. Build with PoCL instead.
+
+From the repository root:
+
+```bash
+xcode-select --install
+brew install cmake pocl
+
+OPENCL_LOADER="$(brew --prefix opencl-icd-loader)/lib/libOpenCL.dylib"
+cmake -S . -B build-pocl \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DOpenCL_LIBRARY="$OPENCL_LOADER"
+cmake --build build-pocl --config Release
+
+./build-pocl/Immolate -h
+```
+
+#### Troubleshooting
+
+Confirm that the executable uses Homebrew's OpenCL loader:
+
+```bash
+otool -L build-pocl/Immolate | grep -E 'libOpenCL|OpenCL.framework'
+```
+
+The output should contain `libOpenCL.dylib`, not `OpenCL.framework`. If it does not, configure again with a new build-directory name.
+
+If PoCL is not detected, check its ICD file and set the vendor directory:
+
+```bash
+ls -l "$(brew --prefix)/etc/OpenCL/vendors/pocl.icd"
+export OCL_ICD_VENDORS="$(brew --prefix)/etc/OpenCL/vendors"
+```
+
+If CMake cannot locate the loader, build directly:
+
+```bash
+mkdir -p build-pocl
+OPENCL_PREFIX="$(brew --prefix opencl-icd-loader)"
+clang -O3 -std=gnu11 -DCL_TARGET_OPENCL_VERSION=120 \
+  immolate.c \
+  -L"$OPENCL_PREFIX/lib" \
+  -Wl,-rpath,"$OPENCL_PREFIX/lib" \
+  -lOpenCL \
+  -o build-pocl/Immolate
+```
+
 ### Linux (Debian)
 Install dependencies:
 
