@@ -1,0 +1,54 @@
+{
+  "algorithm": "sha256",
+  "block_size": 1024,
+  "blocks": [
+    {
+      "count": 1024,
+      "sha256": "2a592663290d2cba0ef122264a1e790b08b5d49a8610e921eef8859eb01bd326",
+      "start_rank": 1000000
+    },
+    {
+      "count": 1024,
+      "sha256": "98bee8c4703ccd0ee7f7ca8cee51d2b7e7317a404c6d8b717258b680fc4afe46",
+      "start_rank": 1001024
+    },
+    {
+      "count": 1024,
+      "sha256": "9c49c02b0c75effccd9086ba99fd62700889fac53c9426aa3ad5eb0cb5fcd68b",
+      "start_rank": 1002048
+    },
+    {
+      "count": 1024,
+      "sha256": "01196afc90a1bb2063cf862e684aeed72ab16a76ad73bc7dd5efc3635c72a3ff",
+      "start_rank": 1003072
+    },
+    {
+      "count": 1024,
+      "sha256": "9b2dd2a114e1b320f4404abd9dc0c674c33b27032465edbbe3a5c437e23cc368",
+      "start_rank": 1004096
+    },
+    {
+      "count": 1024,
+      "sha256": "a8e5cf3e248c32a8193c747354db4cc351c9b015efd2d8cabecc8f263052fb71",
+      "start_rank": 1005120
+    },
+    {
+      "count": 1024,
+      "sha256": "51f1968d00f4eb66347bba063bc968be7ba499a0798ff0f7a45cd6acca737d21",
+      "start_rank": 1006144
+    },
+    {
+      "count": 1024,
+      "sha256": "0ebd35a28e184528ecb07d53fcc38ab56bb710f4ded7a3497dcf6dc81f6c6db7",
+      "start_rank": 1007168
+    }
+  ],
+  "case_id": "scores-early-perkeo-history",
+  "case_sha256": "c0f574d4a1a68c355f70f87951544f8768bb2d9db42ca6a515a644696783772d",
+  "count": 8192,
+  "filter": "early_ante_perkeo",
+  "format": "immolate-score-hashes-v1",
+  "start_rank": 1000000,
+  "type": "score_hashes",
+  "whole_sha256": "96e425d1fe5db7f0db8e4eb87beaf642d1765e7f2d6233d1ea25639002551f5d"
+}

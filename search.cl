@@ -10,6 +10,24 @@
 #define RUN_FILTER(inst_ptr) filter(inst_ptr)
 #endif
 
+// Exact score stream for a contiguous range. Each logical rank owns one output
+// slot, so the host can read scores back in rank order without atomics or
+// sorting. A literal cutoff of zero forces FILTER_USES_CUTOFF filters down their
+// full-score path; no prefilter or printing is involved.
+__kernel void search_scores(long start_rank, long num_seeds, __global long* out) {
+    const long filter_cutoff = 0;
+    long i = get_global_id(0);
+    if (i >= num_seeds) return;
+    long stride = get_global_size(0);
+    seed _seed = s_from_rank(start_rank + i);
+    for (; i < num_seeds; i += stride) {
+        instance inst;
+        i_init(&inst, _seed);
+        out[i] = RUN_FILTER(&inst);
+        s_skip(&_seed, stride);
+    }
+}
+
 // Single-pass search: every seed in [start_rank, start_rank + num_seeds) runs
 // the filter and is printed if its score reaches the -c cutoff. Each lane
 // derives its first seed from its rank once, then steps by the stride.

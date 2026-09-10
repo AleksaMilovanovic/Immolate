@@ -44,6 +44,15 @@ Run:
 ./build/Immolate
 ```
 
+## Correctness and performance tests
+
+Run the complete regression and benchmark gate from the repository root:
+
+```bash
+python3 tests/run.py
+```
+
+The command saves its output under `test-results/`. See [tests/README.md](tests/README.md) for shorter profiles, device selection, golden updates, and exact checkout-to-checkout comparisons.
 
 ## Future Plans
 - Full support with all features in Balatro 1.0.

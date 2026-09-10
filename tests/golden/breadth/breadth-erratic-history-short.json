@@ -1,0 +1,34 @@
+{
+  "algorithm": "sha256",
+  "block_size": 65536,
+  "blocks": [
+    {
+      "count": 65536,
+      "sha256": "fee5f33170bf9442d512d1665b76ec667922364b6c0225a5e6b28ac43d48ab45",
+      "start_rank": 1000000
+    },
+    {
+      "count": 65536,
+      "sha256": "fea2902b99db9a3527447c076ed77c63ce0011b9e5fd7794eb9a2cc9986adff3",
+      "start_rank": 1065536
+    },
+    {
+      "count": 65536,
+      "sha256": "132a3db929068cfe2049f42f7178498fd4de386c20ae3305e09b2a041c724ee8",
+      "start_rank": 1131072
+    },
+    {
+      "count": 3392,
+      "sha256": "7e91068867ba819d6a714570cb79c4feb28973538b808a56795267ce53913d6a",
+      "start_rank": 1196608
+    }
+  ],
+  "case_id": "breadth-erratic-history-short",
+  "case_sha256": "2cad35cd51657e4238f88805825f082f8f3c60fc50872073944be0ad98db3544",
+  "count": 200000,
+  "filter": "erratic_flush_five",
+  "format": "immolate-score-hashes-v1",
+  "start_rank": 1000000,
+  "type": "score_hashes",
+  "whole_sha256": "1e4a08963bdc15611bc3fdecd37bb8a8ffa59b4aa07206f4bc243f0d536917d8"
+}
