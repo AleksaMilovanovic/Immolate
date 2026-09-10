@@ -57,6 +57,7 @@ void i_init(instance* inst, seed s) {
     inst->hashedSeed = pseudohash_seed(&s);
     inst->rngCache.generatedFirstPack = false;
     inst->rngCache.reportedOverflow = false;
+    inst->rngCache.lastNode = -1;
     inst->rngCache.nextFreeNode = 0;
     inst->seedHashValid = 0UL; // entries are written before they are read
     // rng is only consumed after a seeded call, but keep the old zeroed state
@@ -86,11 +87,16 @@ double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
     // The (type, value) pairs and the depth are packed into one 64-bit key, so
     // the lookup is a single compare per cached node instead of a nested loop.
     ulong key = node_key(nts, ids, num);
-    // Recent node streams are usually reused first within the current ante.
-    for (int i = inst->rngCache.nextFreeNode - 1; i >= 0; i--) {
-        if (inst->rngCache.nodes[i].key == key) {
-            node_id = i;
-            break;
+    int lastNode = inst->rngCache.lastNode;
+    if (lastNode >= 0 && inst->rngCache.nodes[lastNode].key == key) {
+        node_id = lastNode;
+    } else {
+        // Recent node streams are usually reused first within the current ante.
+        for (int i = inst->rngCache.nextFreeNode - 1; i >= 0; i--) {
+            if (inst->rngCache.nodes[i].key == key) {
+                node_id = i;
+                break;
+            }
         }
     }
     if (node_id == -1) {
@@ -131,6 +137,7 @@ double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
         }
         inst->rngCache.nodes[node_id].rngState = h;
     }
+    inst->rngCache.lastNode = (short)node_id;
     inst->rngCache.nodes[node_id].rngState = roundDigits(fract(inst->rngCache.nodes[node_id].rngState*1.72431234+2.134453429141),13);
     return (inst->rngCache.nodes[node_id].rngState + inst->hashedSeed)/2;
 }

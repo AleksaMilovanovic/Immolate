@@ -237,6 +237,7 @@ typedef struct Cache {
     rnginfo nodes[CACHE_SIZE];
     bool generatedFirstPack;
     bool reportedOverflow;
+    short lastNode;
     int nextFreeNode;
 } cache;
 
