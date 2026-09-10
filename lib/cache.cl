@@ -228,6 +228,9 @@ inline ulong node_key(ntype nts[], int ids[], int num) {
     return key;
 }
 
+typedef int rng_node_id;
+#define RNG_NODE_INVALID ((rng_node_id)-1)
+
 typedef struct RNGInfo {
     ulong key;
     double rngState;

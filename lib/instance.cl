@@ -81,9 +81,8 @@ void i_init(instance* inst, seed s) {
     inst->params.deckSize = 52;
     inst->params.handSize = 8;
 }
-double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
-    double temp = 0; // will store value set to node, which has some post-processing at the end
-    int node_id = -1;
+rng_node_id rng_node_resolve(instance* inst, ntype nts[], int ids[], int num) {
+    rng_node_id node_id = RNG_NODE_INVALID;
     // The (type, value) pairs and the depth are packed into one 64-bit key, so
     // the lookup is a single compare per cached node instead of a nested loop.
     ulong key = node_key(nts, ids, num);
@@ -99,7 +98,7 @@ double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
             }
         }
     }
-    if (node_id == -1) {
+    if (node_id == RNG_NODE_INVALID) {
         node_id = init_node(&(inst->rngCache), key);
         // pseudohash(name_0 + ... + name_{num-1} + seed), streamed. The hash
         // consumes the string from its last character to its first, so the
@@ -137,9 +136,19 @@ double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
         }
         inst->rngCache.nodes[node_id].rngState = h;
     }
+    return node_id;
+}
+inline double rng_node_advance(instance* inst, rng_node_id node_id) {
     inst->rngCache.lastNode = (short)node_id;
     inst->rngCache.nodes[node_id].rngState = roundDigits(fract(inst->rngCache.nodes[node_id].rngState*1.72431234+2.134453429141),13);
     return (inst->rngCache.nodes[node_id].rngState + inst->hashedSeed)/2;
+}
+inline double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
+    return rng_node_advance(inst, rng_node_resolve(inst, nts, ids, num));
+}
+inline double random_bound(instance* inst, rng_node_id node_id) {
+    inst->rng = randomseed(rng_node_advance(inst, node_id));
+    return l_random(&(inst->rng));
 }
 double random(instance* inst, ntype nts[], int ids[], int num) {
     if (num > 0) {
