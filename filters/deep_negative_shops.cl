@@ -109,10 +109,11 @@ inline rarity dns_joker_rarity_bound(instance* inst, rng_node_id node_id) {
 }
 
 // Classify one joker after its rarity draw: identity where needed, then edition.
-inline void dns_joker_from_rarity(instance* inst, rsrc src, int ante, rarity r, dns_counts* c, item* drawn) {
+inline void dns_joker_from_rarity(instance* inst, rsrc src, int ante, rarity r, rng_node_id commonNode, dns_counts* c, item* drawn) {
     item joker;
     if (r == Rarity_Rare) joker = randchoice_common(inst, R_Joker_Rare, src, ante, RARE_JOKERS);
     else if (r == Rarity_Uncommon) joker = randchoice_common(inst, R_Joker_Uncommon, src, ante, UNCOMMON_JOKERS);
+    else if (commonNode != RNG_NODE_INVALID) joker = randchoice_common_bound(inst, commonNode, R_Joker_Common, src, ante, COMMON_JOKERS);
     else joker = randchoice_common(inst, R_Joker_Common, src, ante, COMMON_JOKERS);
     item edition = next_joker_edition(inst, src, ante);
     *drawn = joker;
@@ -124,7 +125,7 @@ inline void dns_joker_from_rarity(instance* inst, rsrc src, int ante, rarity r, 
 }
 
 inline void dns_joker(instance* inst, rsrc src, int ante, dns_counts* c, item* drawn) {
-    dns_joker_from_rarity(inst, src, ante, next_joker_rarity(inst, src, ante), c, drawn);
+    dns_joker_from_rarity(inst, src, ante, next_joker_rarity(inst, src, ante), RNG_NODE_INVALID, c, drawn);
 }
 
 long filter(instance* inst) {
@@ -161,6 +162,7 @@ long filter(instance* inst) {
             (__private ntype[]){N_Type, N_Ante},
             (__private int[]){R_Card_Type, ante}, 2);
         rng_node_id shopRarityNode = RNG_NODE_INVALID;
+        rng_node_id shopCommonNode = RNG_NODE_INVALID;
         for (int i = 0; i < cards; i++) {
             double card_type = random_bound(inst, cardTypeNode) * totalRate;
             if (get_item_type(shopInstance, card_type) != ItemType_Joker) continue;
@@ -169,9 +171,14 @@ long filter(instance* inst) {
                     (__private ntype[]){N_Type, N_Ante, N_Source},
                     (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
             }
+            rarity r = dns_joker_rarity_bound(inst, shopRarityNode);
+            if (r == Rarity_Common && shopCommonNode == RNG_NODE_INVALID) {
+                shopCommonNode = rng_node_resolve(inst,
+                    (__private ntype[]){N_Type, N_Source, N_Ante},
+                    (__private int[]){R_Joker_Common, S_Shop, ante}, 3);
+            }
             item unused;
-            dns_joker_from_rarity(inst, S_Shop, ante,
-                dns_joker_rarity_bound(inst, shopRarityNode), &c, &unused);
+            dns_joker_from_rarity(inst, S_Shop, ante, r, shopCommonNode, &c, &unused);
         }
         for (int p = 0; p < DNS_PACKS; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
