@@ -74,7 +74,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--update-golden", action="store_true")
     parser.add_argument("--discard-scores", action="store_true")
-    parser.add_argument("--cases", type=Path, default=Path(__file__).with_name("cases.json"))
+    parser.add_argument(
+        "--cases",
+        type=Path,
+        default=None,
+        help="case file (default: tests/cases.json, or tests/diagnostics.json for a diag-* profile)",
+    )
     return parser.parse_args(argv)
 
 
@@ -441,7 +446,13 @@ def summary_text(summary: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     repo = Path(__file__).resolve().parents[1]
-    cases_path = args.cases.resolve()
+    if args.cases is not None:
+        cases_path = args.cases.resolve()
+    else:
+        # The diag-* profiles are defined in diagnostics.json, not cases.json.
+        # Selecting it automatically keeps a diagnostic run a single flag.
+        default_name = "diagnostics.json" if args.profile.startswith("diag-") else "cases.json"
+        cases_path = Path(__file__).with_name(default_name).resolve()
     config = load_json(cases_path)
     if config.get("schema") != 1:
         print("unsupported cases.json schema", file=sys.stderr)
@@ -479,7 +490,14 @@ def main(argv: list[str] | None = None) -> int:
         scale_config = config["scales"][scale]
         batch = args.batch or int(scale_config["batch"])
         repeats = args.repeat or int(scale_config["benchmark_repeats"])
-        selected_tags = set(config["profiles"][args.profile])
+        profiles = config["profiles"]
+        if args.profile not in profiles:
+            raise CaseFailure(
+                f"profile {args.profile!r} is not defined in {cases_path.name}. "
+                f"That file defines: {', '.join(sorted(profiles))}. "
+                f"(diag-* profiles live in tests/diagnostics.json; pass --cases to override.)"
+            )
+        selected_tags = set(profiles[args.profile])
         selected_cases = [case for case in config["cases"] if selected_tags.intersection(case["tags"])]
 
         manifest = {
