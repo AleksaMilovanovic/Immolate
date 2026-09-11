@@ -3,7 +3,10 @@
 
 Standard library only. Run from the Immolate repository root:
 
-    python3 bench-pack/dispatch/dispatch_bench.py <experiment> [--exe PATH] ...
+    python3 tests/dispatch_bench.py <experiment>
+
+The executable and the device's compute-unit count are discovered automatically;
+pass --exe / --cu only to override them.
 
 Timing methodology matches tests/common.py: wall clock (perf_counter) around the
 whole process, one untimed warm-up so .kernel_cache is warm, median of --repeat
@@ -18,10 +21,54 @@ Experiments
     from-batch  E:  --from host-I/O serialisation, isolated by --batch size
     divergence  C:  cost-uniform pool vs natural pool
 """
-import argparse, json, os, statistics, subprocess, sys, time
+import argparse, json, os, re, statistics, subprocess, sys, tempfile, time
+from pathlib import Path
 
 FILTER = "deep_negative_shops"
 CUTOFF = "9223372036854775807"   # nothing prints; pure throughput
+
+
+def find_executable(build_dir="build", cwd="."):
+    """Locate the Immolate binary the way tests/run.py does.
+
+    The default used to be the POSIX literal "./build/Immolate", which does not
+    exist on Windows (CMake/MSVC puts it in build/Release/Immolate.exe) and made
+    every experiment fail with "the system cannot find the file specified".
+    """
+    root = Path(cwd)
+    candidates = [
+        root / build_dir / "Immolate",
+        root / build_dir / "Immolate.exe",
+        root / build_dir / "Release" / "Immolate",
+        root / build_dir / "Release" / "Immolate.exe",
+        root / "build-pocl" / "Immolate",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    tried = "\n  ".join(str(c) for c in candidates)
+    sys.exit(f"could not find the Immolate executable. Tried:\n  {tried}\n"
+             f"Build it first, or pass --exe explicitly.")
+
+
+def detect_compute_units(exe, cwd, env, platform_id, device_id):
+    """Read compute units out of --list_devices so --cu need not be passed."""
+    try:
+        p = subprocess.run([exe, "--list_devices"], cwd=cwd, env=env,
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    current, want = None, (str(platform_id), str(device_id))
+    for line in p.stdout.splitlines():
+        m = re.fullmatch(r"Platform ID ([0-9]+), Device ID ([0-9]+)", line.strip())
+        if m:
+            current = m.groups()
+            continue
+        if current == want:
+            m = re.fullmatch(r"Compute Units: ([0-9]+)", line.strip())
+            if m:
+                return int(m.group(1))
+    return None
 
 
 def run_once(exe, args, cwd, env):
@@ -87,7 +134,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("experiment", choices=["calibrate", "g-sweep", "l-sweep", "regcap",
                                            "saturation", "from-batch", "divergence"])
-    ap.add_argument("--exe", default="./build/Immolate")
+    ap.add_argument("--exe", default=None,
+                    help="path to the Immolate binary; found automatically if omitted")
+    ap.add_argument("--build-dir", dest="build_dir", default="build")
     ap.add_argument("--cwd", default=".")
     ap.add_argument("--platform", default="0")
     ap.add_argument("--device", default="0")
@@ -99,10 +148,22 @@ def main():
     ap.add_argument("--n-start", dest="n_start", type=int, default=20000)
     ap.add_argument("--target", type=float, default=6.0, help="seconds per run")
     ap.add_argument("--fixed", type=float, default=0.5, help="assumed fixed process overhead")
-    ap.add_argument("--cu", type=int, default=84, help="compute units (RTX 5080 = 84)")
-    ap.add_argument("--pool-dir", default="/tmp/immolate-dispatch")
+    ap.add_argument("--cu", type=int, default=0,
+                    help="compute units; read from --list_devices if omitted (RTX 5080 = 84)")
+    ap.add_argument("--pool-dir",
+                    default=os.path.join(tempfile.gettempdir(), "immolate-dispatch"))
     a = ap.parse_args()
     env = dict(os.environ)
+
+    if a.exe is None:
+        a.exe = find_executable(a.build_dir, a.cwd)
+    if a.cu <= 0:
+        detected = detect_compute_units(a.exe, a.cwd, env, a.platform, a.device)
+        if detected is None:
+            sys.exit("could not read compute units from --list_devices; pass --cu explicitly "
+                     "(RTX 5080 = 84).")
+        a.cu = detected
+    print(f"exe {a.exe}  |  compute units {a.cu}")
 
     if a.experiment == "calibrate":
         calibrate(a, env)
@@ -113,7 +174,20 @@ def main():
     if a.experiment == "g-sweep":
         # -g is TOTAL work-groups. Default = CU*16. With localSize 32 on NVIDIA
         # that is one warp per group, so k here is "warps per SM asked for".
-        ks = [4, 8, 10, 12, 13, 14, 15, 16, 17, 18, 20, 24, 28, 32, 48, 64, 128, 256]
+        # k is capped at 32 on purpose. Lanes scale with k (cu*k*32), so with a
+        # FIXED -n the high-k rows silently fall below one seed per lane and
+        # degenerate into "slowest single seed" -- the same D5 pathology this
+        # tool refuses to calibrate into, which would masquerade as an L2 cliff
+        # and argue against the very hypothesis being tested. At k=32 and
+        # n=344,064 every lane still gets 4 seeds. The range covers the
+        # predicted efficiency peaks: k a multiple of W_res, i.e. 12/13/14 and
+        # 24/26/28 for the 12-14 warps/SM that 137-154 registers imply.
+        ks = [8, 12, 13, 14, 15, 16, 17, 18, 20, 24, 26, 28, 30, 32]
+        lanes_at_max_k = a.cu * max(ks) * 32
+        if n < 4 * lanes_at_max_k:
+            print("note: -n %d gives only %.1f seeds/lane at k=%d; rows above k=%d are "
+                  "tail-dominated and should be read with care."
+                  % (n, n / lanes_at_max_k, max(ks), int(n / (4 * a.cu * 32))))
         rows = []
         for k in ks:
             g = a.cu * k

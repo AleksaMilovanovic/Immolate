@@ -18,11 +18,18 @@ Seed counts in `tests/diagnostics.json` assume the 5080 launch width of **43,008
 throughput nobody here has measured. Find out first:
 
 ```bash
-python3 tests/dispatch_bench.py calibrate --filter deep_negative_shops --cu 84 --target 10
+python3 tests/dispatch_bench.py calibrate --target 10
 ```
 
-It prints a calibrated `-n` and the probe time. **Send me that line.** If it suggests an `-n` far from
-430,080, add `--count-scale` to every command below (e.g. `--count-scale 0.25` to quarter the runtime).
+The executable and the device's compute-unit count are discovered automatically; pass `--exe` / `--cu`
+only to override them. It prints a calibrated `-n` and the probe time.
+
+Measured on the target 5080: **344,064 seeds in 32.24 s, i.e. ~10,800 seeds/s.** The calibrated count
+clamped to the saturation floor (8 x 43,008 lanes), and `tests/diagnostics.json` is sized to match, so
+one heavy case is 1 warm-up + 3 samples ~ 2.2 min. Budget **~21 min for `diag-stage1`** and **~95 min
+for `diag-all`** -- run stage 1 first and let its result decide whether the rest is worth the wall time.
+`--repeat 2` trims stage 1 to ~16 min; the effects it looks for (0.79, 1.199, 0.86) are far outside
+run-to-run noise, so two samples suffice.
 
 ---
 
@@ -33,6 +40,10 @@ Three of the four analyses independently named this the cheapest missing datum i
 ```bash
 ./build/Immolate -f deep_negative_shops --verbose_build -n 1 -g 1 2>&1 | tee d0-verbose-build.txt
 ```
+
+On Windows: `.\build\Release\Immolate.exe -f deep_negative_shops --verbose_build -n 1 -g 1 > d0-verbose-build.txt 2>&1`
+
+**Run this before Step 2.** It costs about a second and it decides how Step 2 is read.
 
 **Send me `d0-verbose-build.txt`.** What it settles, from the `search` / `search_ranks` entries:
 
@@ -84,7 +95,7 @@ The largest single lead. `immolate.c` launches `computeUnits * 16` work-groups; 
 per SM that is `ceil(16/15) = 2` waves for `16/15` waves of work — a **1.875x** makespan penalty.
 
 ```bash
-python3 tests/dispatch_bench.py g-sweep --filter deep_negative_shops --cu 84 --target 10
+python3 tests/dispatch_bench.py g-sweep --target 10
 ```
 
 - **sawtooth, jumping at k >= 32** -> wave quantization; adopt the best k (worth up to 1.82x)
@@ -152,3 +163,6 @@ same ratios if it is easier to attach.
   documented workflow. Now routed through the shared helper.
 - **`--count-scale`** added to `tests/run.py` so runtime can be traded against precision without editing
   the cases file.
+- **`tests/dispatch_bench.py` had POSIX-only defaults** -- `./build/Immolate` (no `.exe`, wrong directory
+  on a CMake/MSVC build) and `/tmp/immolate-dispatch`. It now finds the executable the way
+  `tests/run.py` does, reads compute units from `--list_devices`, and uses `tempfile.gettempdir()`.
