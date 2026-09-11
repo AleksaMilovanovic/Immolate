@@ -142,68 +142,23 @@ inline double dns_random_scalar(
     return l_random(scratch);
 }
 
-inline void dns_randomseed_pair(
-    double firstSeed,
-    double secondSeed,
-    lrandom* first,
-    lrandom* second
-) {
-    uint r = 0x11090601u;
-    for (size_t i = 0; i < 4; i++) {
-        uint m = 1u << (r & 255u);
-        r >>= 8;
-        firstSeed = firstSeed * 3.14159265358979323846;
-        secondSeed = secondSeed * 3.14159265358979323846;
-        firstSeed = firstSeed + 2.7182818284590452354;
-        secondSeed = secondSeed + 2.7182818284590452354;
-        first->out.d = firstSeed;
-        second->out.d = secondSeed;
-        ulong firstWord = first->out.ul;
-        ulong secondWord = second->out.ul;
-        if (firstWord < m) firstWord += m;
-        if (secondWord < m) secondWord += m;
-        first->state[i] = firstWord;
-        second->state[i] = secondWord;
-    }
-    for (size_t i = 0; i < 10; i++) {
-        _randint(first);
-        _randint(second);
-    }
-}
-
-inline void dns_random_pair_scalar(
+inline rarity dns_joker_rarity_scalar(
     instance* inst,
     double* state,
-    lrandom* scratch,
-    double* firstPoll,
-    double* secondPoll
+    lrandom* scratch
 ) {
-    double firstSeed = dns_rng_node_advance_scalar(inst, state);
-    double secondSeed = dns_rng_node_advance_scalar(inst, state);
-    lrandom firstRng;
-    dns_randomseed_pair(firstSeed, secondSeed, &firstRng, scratch);
-    *firstPoll = l_random(&firstRng);
-    *secondPoll = l_random(scratch);
+    double poll = dns_random_scalar(inst, state, scratch);
+    if (poll > 0.95) return Rarity_Rare;
+    if (poll > 0.7) return Rarity_Uncommon;
+    return Rarity_Common;
 }
 
-inline void dns_rarity_edition_pair_scalar(
+inline bool dns_joker_negative_scalar(
     instance* inst,
-    double* rarityState,
-    double* editionState,
-    lrandom* scratch,
-    rarity* jokerRarity,
-    bool* negative
+    double* state,
+    lrandom* scratch
 ) {
-    double raritySeed = dns_rng_node_advance_scalar(inst, rarityState);
-    double editionSeed = dns_rng_node_advance_scalar(inst, editionState);
-    lrandom rarityRng;
-    dns_randomseed_pair(raritySeed, editionSeed, &rarityRng, scratch);
-    double rarityPoll = l_random(&rarityRng);
-    double editionPoll = l_random(scratch);
-    if (rarityPoll > 0.95) *jokerRarity = Rarity_Rare;
-    else if (rarityPoll > 0.7) *jokerRarity = Rarity_Uncommon;
-    else *jokerRarity = Rarity_Common;
-    *negative = editionPoll > 0.997;
+    return dns_random_scalar(inst, state, scratch) > 0.997;
 }
 
 inline bool dns_index_locked(int index, ulong lockedLow, ulong lockedHigh) {
@@ -324,17 +279,7 @@ long filter(instance* inst) {
         // Raw shop streams have no frame-local locks, so count card types first
         // and consume the independent Joker streams densely afterward.
         int jokerCards = 0;
-        int card = 0;
-        for (; card + 1 < cards; card += 2) {
-            double firstPoll, secondPoll;
-            dns_random_pair_scalar(inst, &cardTypeState, &shopRng,
-                &firstPoll, &secondPoll);
-            jokerCards += get_item_type(shopInstance,
-                firstPoll * totalRate) == ItemType_Joker;
-            jokerCards += get_item_type(shopInstance,
-                secondPoll * totalRate) == ItemType_Joker;
-        }
-        if (card < cards) {
+        for (int i = 0; i < cards; i++) {
             double card_type = dns_random_scalar(inst,
                 &cardTypeState, &shopRng) * totalRate;
             jokerCards += get_item_type(shopInstance, card_type) == ItemType_Joker;
@@ -363,10 +308,10 @@ long filter(instance* inst) {
                 int uncommonCount = 0, rareCount = 0;
 
                 for (int slot = 0; slot < chunkSize; slot++) {
-                    rarity r;
-                    bool negative;
-                    dns_rarity_edition_pair_scalar(inst, &shopRarityState,
-                        &shopEditionState, &shopRng, &r, &negative);
+                    rarity r = dns_joker_rarity_scalar(inst,
+                        &shopRarityState, &shopRng);
+                    bool negative = dns_joker_negative_scalar(inst,
+                        &shopEditionState, &shopRng);
 
                     if (r == Rarity_Common) {
                         c.other += negative;
