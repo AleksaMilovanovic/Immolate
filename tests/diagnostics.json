@@ -24,7 +24,11 @@
     "diag-all": [
       "diag_rng",
       "diag_mem",
-      "diag_dns"
+      "diag_dns",
+      "diag_chunk"
+    ],
+    "diag-chunk": [
+      "diag_chunk"
     ]
   },
   "scales": {
@@ -686,6 +690,65 @@
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
+    },
+    {
+      "id": "chunk-128-shipped",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "deep_negative_shops",
+      "kind": "benchmark",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807
+    },
+    {
+      "id": "chunk-64",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk64",
+      "kind": "benchmark",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-128-shipped"
+    },
+    {
+      "id": "chunk-256",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk256",
+      "kind": "benchmark",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-128-shipped"
+    },
+    {
+      "id": "chunk-512",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk512",
+      "kind": "benchmark",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-128-shipped"
     }
   ]
 }

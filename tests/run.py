@@ -43,17 +43,14 @@ class CaseFailure(RuntimeError):
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--profile",
-        choices=(
-            "smoke", "quick", "correctness", "breadth", "benchmark", "all",
-            # Diagnostic profiles, defined in tests/diagnostics.json. They select
-            # ablation fixtures that deliberately produce wrong scores, so they
-            # only ever run benchmark-kind cases and never touch tests/golden/.
-            "diag-stage1", "diag-rng", "diag-mem", "diag-dns", "diag-all",
-        ),
-        default="all",
-    )
+    # Valid values come from the selected cases file's "profiles" map, not from a
+    # hardcoded list here: a diag-* profile resolves against tests/diagnostics.json,
+    # everything else against tests/cases.json, and main() validates the name as
+    # soon as that file is loaded (before the build) with a message naming what is
+    # available. A fixed `choices=` tuple silently rejected valid profiles whenever
+    # a cases file gained one.
+    parser.add_argument("--profile", default="all",
+                        help="profile from the cases file (default: all)")
     parser.add_argument("--scale", choices=("auto", "pocl", "rtx5080"), default="auto")
     parser.add_argument("--platform", type=int, default=0)
     parser.add_argument("--device", type=int, default=0)
@@ -457,6 +454,13 @@ def main(argv: list[str] | None = None) -> int:
     if config.get("schema") != 1:
         print("unsupported cases.json schema", file=sys.stderr)
         return 2
+    if args.profile not in config.get("profiles", {}):
+        available = ", ".join(sorted(config.get("profiles", {})))
+        print(f"profile {args.profile!r} is not defined in {cases_path.name}. "
+              f"That file defines: {available}. "
+              f"(diag-* profiles live in tests/diagnostics.json; pass --cases to override.)",
+              file=sys.stderr)
+        return 2
     if args.repeat is not None and args.repeat < 1:
         print("--repeat must be positive", file=sys.stderr)
         return 2
@@ -490,14 +494,7 @@ def main(argv: list[str] | None = None) -> int:
         scale_config = config["scales"][scale]
         batch = args.batch or int(scale_config["batch"])
         repeats = args.repeat or int(scale_config["benchmark_repeats"])
-        profiles = config["profiles"]
-        if args.profile not in profiles:
-            raise CaseFailure(
-                f"profile {args.profile!r} is not defined in {cases_path.name}. "
-                f"That file defines: {', '.join(sorted(profiles))}. "
-                f"(diag-* profiles live in tests/diagnostics.json; pass --cases to override.)"
-            )
-        selected_tags = set(profiles[args.profile])
+        selected_tags = set(config["profiles"][args.profile])
         selected_cases = [case for case in config["cases"] if selected_tags.intersection(case["tags"])]
 
         manifest = {

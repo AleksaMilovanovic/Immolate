@@ -50,6 +50,7 @@ _HOST_LINE_PATTERNS = (
     # "Done in <wall>s" and, since the wall/CPU split, "Done in <wall>s (cpu <cpu>s)".
     re.compile(r"^Done in [0-9.eE+-]+s( \(cpu [0-9.eE+-]+s\))?$"),
     re.compile(r"^This driver rejected -cl-nv-verbose "),
+    re.compile(r"^This driver rejected -cl-nv-maxrregcount=[0-9]+; rebuilding without it\.$"),
 )
 
 

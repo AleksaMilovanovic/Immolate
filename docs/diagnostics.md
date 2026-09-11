@@ -166,3 +166,41 @@ same ratios if it is easier to attach.
 - **`tests/dispatch_bench.py` had POSIX-only defaults** -- `./build/Immolate` (no `.exe`, wrong directory
   on a CMake/MSVC build) and `/tmp/immolate-dispatch`. It now finds the executable the way
   `tests/run.py` does, reads compute units from `--list_devices`, and uses `tempfile.gettempdir()`.
+
+---
+
+## Open questions (what the suite is for now)
+
+Both wins above are landed. Two questions remain, one command each.
+
+### Staging chunk size
+
+`DNS_CHUNK` in `filters/deep_negative_shops.cl` is 128. The mask is now `DNS_CHUNK/64`
+words, so any multiple of 64 works. The divergence model *under-predicted* chunk-128 by
+1.6x (it said 1.264x, hardware gave 2.076x), so the curve may not have flattened.
+
+```bash
+python tests/run.py --profile diag-chunk --scale rtx5080
+```
+
+Compares 64 / 256 / 512 against the shipped 128. All four are bit-exact (verified over
+20,000 seeds), so only the ratios matter. If 256 or 512 beats 1.000x, change the one
+`#define`. ~5 min.
+
+### The fp64 strength-reduction bundle
+
+`diag_rng_a6_exact` measured only 1.029x against a predicted 1.11-1.16x -- but that run
+predates the register cap, so it was contaminated by the allocation lottery. Now that the
+build pins registers on NVIDIA, both sides of the comparison sit at 16 resident warps.
+
+```bash
+python tests/run.py --profile diag-rng --scale rtx5080
+```
+
+Read `diag-a6-exact / diag-a0-base`. ~9 min.
+
+Two caveats. The a6 fixtures are built on the *pre-staging* DNS body, so this measures the
+bundle against the old filter; the four transforms would need porting into the shipped
+filter to be adopted. And the whole RNG core is capped at 19.7% on that old base -- against
+the new one, which is 2.8x faster, the RNG core is a larger share of what remains, so a
+positive result here is worth more than it looks.
