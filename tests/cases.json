@@ -6,7 +6,6 @@
     "correctness": ["compact", "equivalence"],
     "breadth": ["breadth"],
     "benchmark": ["benchmark_core", "benchmark_extended"],
-    "rng-advance": ["rng_advance"],
     "all": ["compact", "equivalence", "breadth", "benchmark_core", "benchmark_extended"]
   },
   "scales": {
@@ -143,16 +142,6 @@
       "golden": "compact/scores-deep-negative-shops.json"
     },
     {
-      "id": "scores-rng-advance-validate",
-      "kind": "scores",
-      "tags": ["smoke", "compact", "rng_advance"],
-      "filter": "rng_advance_validate",
-      "start_rank": 0,
-      "count": 4096,
-      "block_size": 512,
-      "golden": "compact/scores-rng-advance-validate.json"
-    },
-    {
       "id": "equivalence-wr-prefilter",
       "kind": "records_equivalence",
       "tags": ["smoke", "equivalence"],
@@ -229,25 +218,6 @@
       "seed": "11111111",
       "count": {"pocl": 10000, "rtx5080": 500000000},
       "cutoff": 11
-    },
-    {
-      "id": "benchmark-rng-advance-native",
-      "kind": "benchmark",
-      "tags": ["benchmark_core", "rng_advance"],
-      "filter": "bench_rng_advance_native",
-      "seed": "11111111",
-      "count": {"pocl": 10000, "rtx5080": 50000000},
-      "cutoff": 11
-    },
-    {
-      "id": "benchmark-rng-advance-hybrid",
-      "kind": "benchmark",
-      "tags": ["benchmark_core", "rng_advance"],
-      "filter": "bench_rng_advance_hybrid",
-      "seed": "11111111",
-      "count": {"pocl": 10000, "rtx5080": 50000000},
-      "cutoff": 11,
-      "compare_to": "benchmark-rng-advance-native"
     },
     {
       "id": "benchmark-erratic-combined",
