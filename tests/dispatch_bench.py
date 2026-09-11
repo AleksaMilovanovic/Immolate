@@ -106,6 +106,10 @@ def calibrate(a, env):
     floor_n = a.cu * 16 * 32 * 8
     n = max(a.n_start, floor_n)
     dt = None
+    # Untimed warm-up, matching timed(): without it the first probe on a cold
+    # .kernel_cache pays the OpenCL kernel build (~24s for DNS on an RTX 5080),
+    # which inflated a 8.24s probe to 32.24s and under-calibrated -n by ~4x.
+    run_once(a.exe, base(a) + ["-n", floor_n, "--batch", a.batch], a.cwd, env)
     for _ in range(6):
         dt, p = run_once(a.exe, base(a) + ["-n", n, "--batch", a.batch], a.cwd, env)
         if p.returncode != 0:
