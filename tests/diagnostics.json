@@ -6,7 +6,7 @@
     "references tests/golden/, and no diag_* filter may ever be added to one.",
     "The two exact candidates (diag_rng_a6_exact, dns_staged_resample*) were verified",
     "score-identical to their baselines and are the only adoptable fixtures in the set.",
-    "Counts are multiples of the rtx5080 launch width (43008 lanes = 84 CU x 16 groups x 32)."
+    "Counts are multiples of the rtx5080 launch width (43008 lanes = 84 CU x 16 groups x 32). HEAVY=344064 is 8x lanes, dispatch_bench's saturation floor and the value its calibrate mode returned on the target device."
   ],
   "profiles": {
     "diag-stage1": [
@@ -49,7 +49,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807
     },
@@ -63,7 +63,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-a0-base"
@@ -78,7 +78,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-a0-base"
@@ -93,7 +93,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-a0-base"
@@ -108,7 +108,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-a0-base"
@@ -123,7 +123,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-a0-base"
@@ -139,7 +139,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-a0-base"
@@ -154,7 +154,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-a0-base"
@@ -169,7 +169,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 5591040
+        "rtx5080": 4472832
       },
       "cutoff": 9223372036854775807
     },
@@ -183,7 +183,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 5591040
+        "rtx5080": 4472832
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-chain-k1"
@@ -198,7 +198,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 5591040
+        "rtx5080": 4472832
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-chain-k1"
@@ -213,7 +213,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 5591040
+        "rtx5080": 4472832
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-chain-k1"
@@ -228,7 +228,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 2838528
+        "rtx5080": 2279424
       },
       "cutoff": 9223372036854775807
     },
@@ -242,7 +242,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 2838528
+        "rtx5080": 2279424
       },
       "cutoff": 9223372036854775807,
       "compare_to": "diag-ph-base"
@@ -258,7 +258,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807
     },
@@ -273,7 +273,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-ballast-0k"
@@ -289,7 +289,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-ballast-0k"
@@ -305,7 +305,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-ballast-0k"
@@ -321,7 +321,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-ballast-0k"
@@ -336,7 +336,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807
     },
@@ -350,7 +350,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-cache-256"
@@ -365,7 +365,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-cache-256"
@@ -380,7 +380,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-cache-256"
@@ -395,7 +395,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-cache-256"
@@ -410,7 +410,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-cache-256"
@@ -425,7 +425,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "mem-cache-256"
@@ -441,7 +441,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807
     },
@@ -455,7 +455,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -470,7 +470,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -485,7 +485,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -500,7 +500,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -515,7 +515,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -530,7 +530,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -545,7 +545,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -560,7 +560,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -575,7 +575,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -590,7 +590,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -606,7 +606,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -622,7 +622,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -637,7 +637,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -652,7 +652,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -667,7 +667,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
@@ -682,7 +682,7 @@
       "seed": "11111111",
       "count": {
         "pocl": 2048,
-        "rtx5080": 430080
+        "rtx5080": 344064
       },
       "cutoff": 9223372036854775807,
       "compare_to": "dns-diag-baseline"
