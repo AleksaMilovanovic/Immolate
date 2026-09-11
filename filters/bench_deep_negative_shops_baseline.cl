@@ -135,10 +135,6 @@ inline rarity dns_joker_rarity_bound(instance* inst, rng_node_id node_id) {
     return Rarity_Common;
 }
 
-inline bool dns_joker_negative_bound(instance* inst, rng_node_id node_id) {
-    return random_bound(inst, node_id) > 0.997;
-}
-
 // Classify one joker after its rarity draw: identity where needed, then edition.
 inline void dns_joker_from_rarity(instance* inst, rsrc src, int ante, rarity r, dns_counts* c, item* drawn) {
     item joker;
@@ -152,6 +148,15 @@ inline void dns_joker_from_rarity(instance* inst, rsrc src, int ante, rarity r, 
     if (joker == Brainstorm || joker == Blueprint) c->copy++;
     else if (r == Rarity_Uncommon) c->uncommon++;
     else c->other++;
+}
+
+inline void dns_shop_joker_from_rarity(instance* inst, int ante, rarity r, dns_counts* c) {
+    if (r == Rarity_Common) {
+        if (next_joker_edition(inst, S_Shop, ante) == Negative) c->other++;
+        return;
+    }
+    item unused;
+    dns_joker_from_rarity(inst, S_Shop, ante, r, c, &unused);
 }
 
 inline void dns_joker(instance* inst, rsrc src, int ante, dns_counts* c, item* drawn) {
@@ -208,50 +213,9 @@ long filter(instance* inst) {
             rng_node_id shopRarityNode = rng_node_resolve(inst,
                 (__private ntype[]){N_Type, N_Ante, N_Source},
                 (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
-            rng_node_id shopEditionNode = rng_node_resolve(inst,
-                (__private ntype[]){N_Type, N_Source, N_Ante},
-                (__private int[]){R_Joker_Edition, S_Shop, ante}, 3);
-
-            // Stage rarity and edition in warp-sized chunks, then consume each
-            // identity stream densely while preserving its ordinal draw order.
-            for (int base = 0; base < jokerCards; base += 32) {
-                int chunkSize = min(32, jokerCards - base);
-                uint uncommonNegative = 0u, rareNegative = 0u;
-                int uncommonCount = 0, rareCount = 0;
-
-                for (int slot = 0; slot < chunkSize; slot++) {
-                    rarity r = dns_joker_rarity_bound(inst, shopRarityNode);
-                    bool negative = dns_joker_negative_bound(inst, shopEditionNode);
-
-                    if (r == Rarity_Common) {
-                        c.other += negative;
-                    } else if (r == Rarity_Uncommon) {
-                        uncommonNegative |= (uint)negative << uncommonCount;
-                        uncommonCount++;
-                    } else {
-                        rareNegative |= (uint)negative << rareCount;
-                        rareCount++;
-                    }
-                }
-
-                for (int ordinal = 0; ordinal < uncommonCount; ordinal++) {
-                    item joker = randchoice_common(inst, R_Joker_Uncommon,
-                        S_Shop, ante, UNCOMMON_JOKERS);
-                    if (joker == Diet_Cola) {
-                        c.other++;
-                    } else if ((uncommonNegative >> ordinal) & 1u) {
-                        c.uncommon++;
-                    }
-                }
-
-                for (int ordinal = 0; ordinal < rareCount; ordinal++) {
-                    item joker = randchoice_common(inst, R_Joker_Rare,
-                        S_Shop, ante, RARE_JOKERS);
-                    if ((rareNegative >> ordinal) & 1u) {
-                        if (joker == Brainstorm || joker == Blueprint) c.copy++;
-                        else c.other++;
-                    }
-                }
+            for (int i = 0; i < jokerCards; i++) {
+                dns_shop_joker_from_rarity(inst, ante,
+                    dns_joker_rarity_bound(inst, shopRarityNode), &c);
             }
         }
         for (int p = 0; p < DNS_PACKS; p++) {
