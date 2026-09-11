@@ -139,6 +139,26 @@ inline bool dns_joker_negative_bound(instance* inst, rng_node_id node_id) {
     return random_bound(inst, node_id) > 0.997;
 }
 
+inline item dns_shop_randchoice_bound(
+    instance* inst,
+    rng_node_id node_id,
+    rtype rngType,
+    int ante,
+    __constant item items[]
+) {
+    inst->rng = randomseed(rng_node_advance(inst, node_id));
+    item i = items[l_randint(&(inst->rng), 1, items[0])];
+    if (!inst->params.showman && i_locked(inst, i)) {
+        int resampleNum = 1;
+        while (i_locked(inst, i)) {
+            i = randchoice_resample(inst, rngType, S_Shop,
+                ante, items, resampleNum);
+            resampleNum++;
+        }
+    }
+    return i;
+}
+
 // Classify one joker after its rarity draw: identity where needed, then edition.
 inline void dns_joker_from_rarity(instance* inst, rsrc src, int ante, rarity r, dns_counts* c, item* drawn) {
     item joker;
@@ -211,6 +231,8 @@ long filter(instance* inst) {
             rng_node_id shopEditionNode = rng_node_resolve(inst,
                 (__private ntype[]){N_Type, N_Source, N_Ante},
                 (__private int[]){R_Joker_Edition, S_Shop, ante}, 3);
+            rng_node_id shopUncommonNode = RNG_NODE_INVALID;
+            rng_node_id shopRareNode = RNG_NODE_INVALID;
 
             // Stage rarity and edition in warp-sized chunks, then consume each
             // identity stream densely while preserving its ordinal draw order.
@@ -234,9 +256,15 @@ long filter(instance* inst) {
                     }
                 }
 
+                if (uncommonCount > 0 && shopUncommonNode == RNG_NODE_INVALID) {
+                    shopUncommonNode = rng_node_resolve(inst,
+                        (__private ntype[]){N_Type, N_Source, N_Ante},
+                        (__private int[]){R_Joker_Uncommon, S_Shop, ante}, 3);
+                }
                 for (int ordinal = 0; ordinal < uncommonCount; ordinal++) {
-                    item joker = randchoice_common(inst, R_Joker_Uncommon,
-                        S_Shop, ante, UNCOMMON_JOKERS);
+                    item joker = dns_shop_randchoice_bound(inst,
+                        shopUncommonNode, R_Joker_Uncommon, ante,
+                        UNCOMMON_JOKERS);
                     if (joker == Diet_Cola) {
                         c.other++;
                     } else if ((uncommonNegative >> ordinal) & 1u) {
@@ -244,9 +272,14 @@ long filter(instance* inst) {
                     }
                 }
 
+                if (rareCount > 0 && shopRareNode == RNG_NODE_INVALID) {
+                    shopRareNode = rng_node_resolve(inst,
+                        (__private ntype[]){N_Type, N_Source, N_Ante},
+                        (__private int[]){R_Joker_Rare, S_Shop, ante}, 3);
+                }
                 for (int ordinal = 0; ordinal < rareCount; ordinal++) {
-                    item joker = randchoice_common(inst, R_Joker_Rare,
-                        S_Shop, ante, RARE_JOKERS);
+                    item joker = dns_shop_randchoice_bound(inst,
+                        shopRareNode, R_Joker_Rare, ante, RARE_JOKERS);
                     if ((rareNegative >> ordinal) & 1u) {
                         if (joker == Brainstorm || joker == Blueprint) c.copy++;
                         else c.other++;
