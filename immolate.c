@@ -247,7 +247,13 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i],  "--build_opts")==0) { // DIAGNOSTIC: extra clBuildProgram options
             if (i + 1 >= argc) { fprintf_s(stderr, "--build_opts requires a value.\n"); return EXIT_FAILURE; }
             extraBuildOpts = argv[i+1];
-            noCache = 1; // the cache key does not cover this, so never reuse a binary
+            // No noCache here: the options are appended to `include_path` below,
+            // and the cache key hashes that string, so each distinct option set
+            // gets its own cache entry. Forcing a rebuild instead made every
+            // --build_opts run pay the full kernel build (~24 s on an RTX 5080),
+            // which swamped the thing being measured -- a maxrregcount sweep came
+            // back at a uniform ~32 s for every cap, including caps above the
+            // kernel's own register usage, which constrain nothing at all.
             i++;
         }
         if (strcmp(argv[i],  "-n")==0) {
