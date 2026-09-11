@@ -6,3 +6,8 @@ __pycache__/
 *.pyc
 *.seeds
 output/
+
+# Local PoCL build (macOS: Apple GPUs cannot run the fp64 kernels)
+build-pocl/
+# Agent worktrees
+.claude/

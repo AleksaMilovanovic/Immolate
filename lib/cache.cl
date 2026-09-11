@@ -249,10 +249,17 @@ int init_node(cache* c, ulong key) {
         // Previously this wrote past nodes[] silently. Warn once per work-item
         // and reuse the last slot instead; results for this seed will be wrong,
         // but nothing is corrupted.
+        // DIAG_SILENCE_CACHE_OVERFLOW suppresses only the warning, never the
+        // overflow itself: a build that defines it still produces WRONG SCORES
+        // for any seed that overflows. It exists so the footprint diagnostics in
+        // tests/diag_mem.json can time deliberately undersized caches without
+        // the warning aborting the case. Never define it for a real run.
+#ifndef DIAG_SILENCE_CACHE_OVERFLOW
         if (!c->reportedOverflow) {
             c->reportedOverflow = true;
             printf("Immolate: RNG node cache overflow, CACHE_SIZE=%d is too small for this filter\n", CACHE_SIZE);
         }
+#endif
         c->nodes[CACHE_SIZE-1].key = key;
         return CACHE_SIZE-1;
     }

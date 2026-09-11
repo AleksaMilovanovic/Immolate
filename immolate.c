@@ -4,6 +4,19 @@
 #include <errno.h>
 #include <time.h>
 
+// Wall-clock seconds from a monotonic-ish source. `clock()` returns PROCESS CPU
+// time summed over every thread, which on a multi-threaded CPU OpenCL device
+// (PoCL) reports several times the elapsed time -- a 1.7 s run printed 6.75 s.
+// On a GPU it happens to track wall time only because the host spins in
+// clFinish, so the same number means two different things depending on the
+// device. timespec_get(TIME_UTC) is C11 and available on every target this
+// builds for; the searcher only ever uses it for a difference.
+static double wall_seconds(void) {
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 // Launch a 1-D kernel over numGroups work-groups. If the driver rejects the
 // work-group size for this kernel, halve it once and retry; the new geometry is
 // written back so later launches use it too.
@@ -31,7 +44,7 @@ static int parse_cl_long_arg(const char* text, cl_long* value) {
 
 static int cli_is_known_option(const char* text) {
     static const char* options[] = {
-        "-h", "-f", "-s", "-n", "-c", "-p", "-d", "-g",
+        "-h", "-f", "-s", "-n", "-c", "-p", "-d", "-g", "-l", "--build_opts",
         "--list_devices", "--no_cache", "--verbose_build", "--single_pass",
         "--batch", "--progress", "--to", "--scores_to", "--from",
         "--to_parts", "--resume"
@@ -169,6 +182,12 @@ int main(int argc, char **argv) {
     unsigned int platformID = 0;
     unsigned int deviceID = 0;
     unsigned int numGroups = 0; // 0 = derive from the device's compute unit count
+    // DIAGNOSTIC ONLY (dispatch bench pack): -l forces the local work-group size
+    // instead of CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, and --build_opts
+    // appends to the string handed to clBuildProgram. Neither is meant to ship;
+    // both exist so a launch-configuration sweep needs no rebuild per point.
+    unsigned int forcedLocal = 0;
+    const char* extraBuildOpts = NULL;
     int noCache = 0;
     int verboseBuild = 0;
     int singlePass = 0;
@@ -218,6 +237,17 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i],  "-g")==0) {
             if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             numGroups = atoi(argv[i+1]);
+            i++;
+        }
+        if (strcmp(argv[i],  "-l")==0) { // DIAGNOSTIC: force the local work-group size
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
+            forcedLocal = atoi(argv[i+1]);
+            i++;
+        }
+        if (strcmp(argv[i],  "--build_opts")==0) { // DIAGNOSTIC: extra clBuildProgram options
+            if (i + 1 >= argc) { fprintf_s(stderr, "--build_opts requires a value.\n"); return EXIT_FAILURE; }
+            extraBuildOpts = argv[i+1];
+            noCache = 1; // the cache key does not cover this, so never reuse a binary
             i++;
         }
         if (strcmp(argv[i],  "-n")==0) {
@@ -466,7 +496,7 @@ int main(int argc, char **argv) {
 
     // Get CWD
     char executable_dir[MAX_PATH];
-    char include_path[MAX_PATH+32];
+    char include_path[MAX_PATH+288]; // +256 of headroom for DIAGNOSTIC --build_opts
     char kernel_path[MAX_PATH+12];
     getExecutableDir(executable_dir);
     strcpy_s(kernel_path, sizeof kernel_path, executable_dir);
@@ -489,6 +519,10 @@ int main(int argc, char **argv) {
     strcpy_s(include_path, sizeof include_path, "-I \"");
     strcat_s(include_path, sizeof include_path, executable_dir);
     strcat_s(include_path, sizeof include_path, "\"");
+    if (extraBuildOpts) { // DIAGNOSTIC
+        strcat_s(include_path, sizeof include_path, " ");
+        strcat_s(include_path, sizeof include_path, extraBuildOpts);
+    }
     if (verboseBuild) {
         strcat_s(include_path, sizeof include_path, " -cl-nv-verbose");
     }
@@ -732,6 +766,10 @@ build_program:
     // kernel's real limit for CL_KERNEL_WORK_GROUP_SIZE.
     size_t localSize = preferredMultiple;
     if (localSize > maxWorkGroup) localSize = maxWorkGroup;
+    if (forcedLocal > 0) { // DIAGNOSTIC: -l overrides the derived work-group size
+        localSize = forcedLocal;
+        printf_s("Forcing local work-group size %zu (device/kernel would have used %zu).\n", localSize, preferredMultiple);
+    }
     if (numGroups == 0) {
         cl_uint computeUnits = 1;
         err = clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(computeUnits), &computeUnits, NULL);
@@ -906,6 +944,7 @@ build_program:
     printf_s("Starting searcher...\n");
     fflush(stdout);
     clock_t begin = clock();
+    double wallBegin = wall_seconds();
     int exitCode = EXIT_SUCCESS;
     if (scoresToFile) {
         if (!write_score_stream(ctx, queue, scoresKernel, &globalSize, &localSize, numGroups,
@@ -1032,7 +1071,12 @@ build_program:
                     size_t listGroups = ((size_t)thisBatch + localSize - 1) / localSize;
                     if (listGroups > (size_t)numGroups) listGroups = numGroups;
                     size_t listGlobal = listGroups * localSize;
-                    err = clEnqueueNDRangeKernel(queue, k, 1, NULL, &listGlobal, &localSize, 0, NULL, NULL);
+                    // Via enqueue_1d, not a bare clEnqueueNDRangeKernel: this is
+                    // the --from path, and without the shared helper it was the
+                    // only launch in the program with no work-group-size
+                    // fallback, so a driver rejecting localSize here was a hard
+                    // failure instead of a halve-and-retry.
+                    err = enqueue_1d(queue, k, &listGlobal, &localSize, (unsigned int)listGroups);
                     clErrCheck(err, "clEnqueueNDRangeKernel - Executing ranks kernel");
                     if (toFile) {
                         err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
@@ -1124,8 +1168,10 @@ build_program:
     err = clReleaseCommandQueue(queue);
     err = clReleaseContext(ctx);
     clock_t end = clock();
-    double time_spent = (double)(end-begin) / CLOCKS_PER_SEC;
-    printf("Done in %fs",time_spent);
+    double cpu_spent = (double)(end-begin) / CLOCKS_PER_SEC;
+    double wall_spent = wall_seconds() - wallBegin;
+    // Wall time first: it is the one that means "how long did this take".
+    printf("Done in %fs (cpu %fs)", wall_spent, cpu_spent);
 
     return exitCode;
 }

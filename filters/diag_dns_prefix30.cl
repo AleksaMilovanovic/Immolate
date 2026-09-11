@@ -1,3 +1,12 @@
+// ===========================================================================
+// DIAGNOSTIC ABLATION - PRODUCES DELIBERATELY WRONG SCORES.
+// Part of the DNS benchmark pack. Never wire this into correctness goldens.
+// PREFILTER PROTOTYPE. Runs the voucher chain for every ante but the shop,
+// pack and tag work only for antes 3..30. The returned score is the exact
+// PREFIX score, which is a LOWER bound on the full score and therefore
+// cannot be used to reject a seed without false negatives - see the
+// report. Shipped to measure prefix COST as a fraction of the full run.
+// ===========================================================================
 // Deep shop scan, antes 3-38: negative jokers, Diet Colas and Negative Tags.
 // Meant to run over a seed-supplier pool (--from); at ~11,000 shop cards per
 // seed it is far too slow for a raw walk.
@@ -60,18 +69,8 @@
 
 // Across 20,480 stratified seeds the per-ante peak was 80 nodes (p99 51).
 // Keep legacy global-pack versions at the original cumulative capacity.
-// Measured over 20,480 stratified seeds (8 start seeds x 2,560): per-ante peak
-// p50 34, p90 41, p99 52, p99.9 62, max 83. The upper tail is exponential with
-// ratio 0.818 per node, so P(peak > 256) ~ 1e-20 and P(peak > 128) ~ 2e-9.
-// 256 keeps overflow (which silently corrupts that seed's score) unreachable.
-// DNS_CACHE_SIZE_OVERRIDE exists only for the footprint diagnostics in
-// tests/diag_mem.json; leave it undefined for real runs.
 #if DNS_ANTE_LOCAL_CACHE
-    #ifdef DNS_CACHE_SIZE_OVERRIDE
-        #define CACHE_SIZE DNS_CACHE_SIZE_OVERRIDE
-    #else
-        #define CACHE_SIZE 256
-    #endif
+    #define CACHE_SIZE 256
 #else
     #define CACHE_SIZE 2048
 #endif
@@ -223,27 +222,7 @@ inline void dns_joker(instance* inst, rsrc src, int ante, dns_counts* c, item* d
     dns_joker_from_rarity(inst, src, ante, next_joker_rarity(inst, src, ante), c, drawn);
 }
 
-// DIAG_BALLAST_KB adds N KB of otherwise-unused private memory to the kernel
-// frame, to measure how per-work-item footprint alone affects throughput. It
-// changes nothing else: the same draws, the same ALU, the same cache traffic.
-// The array is volatile and is written and read at two seed-dependent indices
-// the compiler cannot bound, so it cannot be scalarised away; the value read is
-// always the value written, so the returned score stays bit-identical to a
-// DIAG_BALLAST_KB=0 build. Diagnostic only - see tests/diag_mem.json.
-#ifndef DIAG_BALLAST_KB
-#define DIAG_BALLAST_KB 0
-#endif
-#define DIAG_BALLAST_WORDS (DIAG_BALLAST_KB * 128)
-#define DIAG_BALLAST_MAGIC 0x5A5A5A5A5A5A5A5AUL
-
 long filter(instance* inst) {
-#if DIAG_BALLAST_KB > 0
-    volatile ulong diag_ballast[DIAG_BALLAST_WORDS];
-    uint diag_bi = (uint)(inst->seed.data[0] * 31UL + inst->seed.data[1]) % (uint)DIAG_BALLAST_WORDS;
-    uint diag_bj = (uint)(inst->seed.data[2] * 17UL + inst->seed.data[3] + 1UL) % (uint)DIAG_BALLAST_WORDS;
-    diag_ballast[diag_bi] = DIAG_BALLAST_MAGIC;
-    diag_ballast[diag_bj] = DIAG_BALLAST_MAGIC;
-#endif
     for (int i = 0; i < (int)(sizeof(DNS_UPGRADE_VOUCHERS) / sizeof(item)); i++) i_lock(inst, DNS_UPGRADE_VOUCHERS[i]);
     DNS_APPLY_LOCKS(DNS_LOCKED_COMMONS, i_lock)
     DNS_APPLY_LOCKS(DNS_LOCKED_UNCOMMONS, i_lock)
@@ -280,6 +259,14 @@ long filter(instance* inst) {
     int firstTagNeg = 0, secondTagNeg = 0;
 
     for (int ante = 1; ante <= DNS_LAST_ANTE; ante++) {
+        if (ante > 30 && ante >= DNS_FIRST_ANTE) { // PREFIX PROTOTYPE
+            // keep the voucher chain exact, drop all shop/pack/tag work
+            item _v = next_voucher(inst, ante);
+            for (int i = 0; i < (int)(sizeof(DNS_BOUGHT_VOUCHERS) / sizeof(item)); i++) {
+                if (DNS_BOUGHT_VOUCHERS[i] == _v) { activate_voucher(inst, _v); break; }
+            }
+            continue;
+        }
 #if DNS_ANTE_LOCAL_CACHE
         // Every reachable node in this version is ante-keyed. Keep persistent
         // cache flags and seed-hash state; only discard unreachable node slots.
@@ -410,13 +397,6 @@ long filter(instance* inst) {
             for (int j = 0; j < _pack.size; j++) i_unlock(inst, drawn[j]);
         }
     }
-#if DIAG_BALLAST_KB > 0
-    // Always 0: diag_bj was written with the magic above. Keeps the ballast
-    // live across the whole ante loop without perturbing the score.
-    long diag_extra = (diag_ballast[diag_bj] == DIAG_BALLAST_MAGIC) ? 0L : 1L;
-#else
-    long diag_extra = 0L;
-#endif
     return (long)c.copy * 1000000000000L + (long)c.uncommon * 1000000000L + (long)c.other * 1000000L
-         + (long)firstTagNeg * 1000L + (long)secondTagNeg + diag_extra;
+         + (long)firstTagNeg * 1000L + (long)secondTagNeg;
 }

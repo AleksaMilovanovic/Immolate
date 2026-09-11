@@ -1,3 +1,38 @@
+// ===========================================================================
+// DIAGNOSTIC FIXTURE BODY -- NOT A CORRECTNESS ARTEFACT.
+//
+// Parameterised copy of filters/deep_negative_shops.cl used to attribute the
+// cost of the fp64 RNG core on a real RTX 5080. Selecting any DIAG_VARIANT
+// other than BASE or EXACT produces DELIBERATELY WRONG SCORES; those variants
+// exist only to measure how much time a component costs, by deleting it.
+//
+// Never wire any diag_* fixture into tests/golden/ or into a profile that
+// compares against a golden. The only variant whose scores must match BASE is
+// DIAG_VARIANT_EXACT, which is bit-exact by construction.
+//
+// Variants (exactly one must be defined by the including wrapper):
+//   DIAG_VARIANT_BASE      frozen copy of the current filter (reference)
+//   DIAG_VARIANT_NOWARMUP  randomseed() warmup 10 rounds -> 0        [WRONG]
+//   DIAG_VARIANT_NOROUND   advance drops roundDigits/div_1e13        [WRONG]
+//   DIAG_VARIANT_INTSTATE  advance replaced by integer xorshift      [WRONG]
+//   DIAG_VARIANT_NOSEEDFP  randomseed 4x(mul,add) -> integer mix     [WRONG]
+//   DIAG_VARIANT_NORNGCORE randomseed+l_random -> integer xorshift   [WRONG]
+//   DIAG_VARIANT_EXACT     bit-exact strength-reduction bundle       [EXACT]
+//   DIAG_VARIANT_LEANWARM  bit-exact: dead XOR accumulator dropped   [EXACT]
+//                          from randomseed's 10 warmup rounds
+//
+// Only the filter-local scalar hot path is altered. Instrumented counts on
+// five seeds put 94.1% of all RNG draws on that path (47,256 of 50,202 for
+// seed 11111111), so every ablation ratio understates the true component
+// share by about 6%; scale a measured drop by 1/0.941 for a whole-kernel bound.
+// ===========================================================================
+
+#if !defined(DIAG_VARIANT_BASE) && !defined(DIAG_VARIANT_NOWARMUP) && \
+    !defined(DIAG_VARIANT_NOROUND) && !defined(DIAG_VARIANT_INTSTATE) && \
+    !defined(DIAG_VARIANT_NOSEEDFP) && !defined(DIAG_VARIANT_NORNGCORE) && \
+    !defined(DIAG_VARIANT_EXACT) && !defined(DIAG_VARIANT_LEANWARM)
+#error "diag_rng_dns_body.cl: define exactly one DIAG_VARIANT_* before including"
+#endif
 // Deep shop scan, antes 3-38: negative jokers, Diet Colas and Negative Tags.
 // Meant to run over a seed-supplier pool (--from); at ~11,000 shop cards per
 // seed it is far too slow for a raw walk.
@@ -60,18 +95,8 @@
 
 // Across 20,480 stratified seeds the per-ante peak was 80 nodes (p99 51).
 // Keep legacy global-pack versions at the original cumulative capacity.
-// Measured over 20,480 stratified seeds (8 start seeds x 2,560): per-ante peak
-// p50 34, p90 41, p99 52, p99.9 62, max 83. The upper tail is exponential with
-// ratio 0.818 per node, so P(peak > 256) ~ 1e-20 and P(peak > 128) ~ 2e-9.
-// 256 keeps overflow (which silently corrupts that seed's score) unreachable.
-// DNS_CACHE_SIZE_OVERRIDE exists only for the footprint diagnostics in
-// tests/diag_mem.json; leave it undefined for real runs.
 #if DNS_ANTE_LOCAL_CACHE
-    #ifdef DNS_CACHE_SIZE_OVERRIDE
-        #define CACHE_SIZE DNS_CACHE_SIZE_OVERRIDE
-    #else
-        #define CACHE_SIZE 256
-    #endif
+    #define CACHE_SIZE 256
 #else
     #define CACHE_SIZE 2048
 #endif
@@ -138,18 +163,184 @@ typedef struct DnsCounts {
     int copy, uncommon, other;
 } dns_counts;
 
-inline double dns_rng_node_advance_scalar(instance* inst, double* state) {
-    *state = roundDigits(fract(*state * 1.72431234 + 2.134453429141), 13);
-    return (*state + inst->hashedSeed) / 2;
+// ---------------------------------------------------------------------------
+// Parameterised scalar hot path. See the header for what each variant deletes.
+// ---------------------------------------------------------------------------
+
+// Bit-exact helpers used only by DIAG_VARIANT_EXACT.
+//
+// (E1) floor(y) for y = state*1.72431234 + 2.134453429141 is always 2 or 3,
+//      because state is always in [0, 1]. Selecting between the two constants
+//      on the integer bit pattern (monotone for positive doubles) removes one
+//      fp64 floor. Verified bit-identical on 40,000,000 states on the host.
+inline double diag_fract23(double y) {
+    return y - ((as_ulong(y) >= 0x4008000000000000UL) ? 3.0 : 2.0);
+}
+// (E2) round(x) == floor(x + 0.5) for every x in [0, 2^52). Here x = f*1e13
+//      with f in [0,1), so x < 1e13 < 2^44 and x + 0.5 is exact. OpenCL round()
+//      is half-away-from-zero and expands to trunc/sub/fabs/compare/copysign/add
+//      on NVIDIA; floor() is one instruction (cvt.rmi.f64.f64).
+//      Verified bit-identical on 40,000,000 states on the host.
+inline double diag_round13(double f) {
+    return div_1e13(floor(f * 1e13 + 0.5));
+}
+// (E3) randomseed's first step is d*pi where d = (state + hashedSeed)/2.
+//      Halving is exact and pi/2 is exactly representable, so
+//      (x/2)*pi and x*(pi/2) round identically: the /2 disappears.
+//      Verified bit-identical on 40,000,000 states on the host.
+#define DIAG_PI       0x1.921fb54442d18p+1
+#define DIAG_PI_HALF  0x1.921fb54442d18p+0
+#define DIAG_E        2.7182818284590452354
+inline lrandom diag_randomseed_x2(double x2) { // x2 == state + hashedSeed
+    lrandom lr;
+    uint r = 0x11090601;
+    double d = x2 * DIAG_PI_HALF;   // == ((x2)/2) * pi, bit-identical
+    d = d + DIAG_E;
+    uint m = 1 << (r & 255); r >>= 8;
+    lr.out.d = d;
+    ulong u = lr.out.ul; if (u < m) u += m; lr.state[0] = u;
+    for (size_t i = 1; i < 4; i++) {
+        m = 1 << (r & 255); r >>= 8;
+        d = d * DIAG_PI;
+        d = d + DIAG_E;
+        lr.out.d = d;
+        u = lr.out.ul; if (u < m) u += m; lr.state[i] = u;
+    }
+    for (size_t i = 0; i < 10; i++) _randint(&lr);
+    return lr;
+}
+// (E4) l_random returns m * 2^-52 with m the 52-bit Tausworthe mantissa, so a
+//      threshold test d > t is exactly the integer test m > floor(t * 2^52).
+//      Removes one fp64 subtract and one fp64 compare per threshold draw.
+//      Boundary-exhaustive and 40,000,000-sample verified on the host.
+#define DIAG_MANT_MASK   4503599627370495UL
+#define DIAG_THR_0_95    4278419646001971UL
+#define DIAG_THR_0_70    3152519739159347UL
+#define DIAG_THR_0_997   4490088828488384UL
+inline ulong diag_l_random_mantissa(lrandom* lr) {
+    _randint(lr);
+    return lr->out.ul & DIAG_MANT_MASK;
 }
 
+// Ablation helpers. These are NOT exact.
+inline lrandom diag_randomseed_nowarmup(double d) {   // warmup 10 -> 0
+    lrandom lr;
+    uint r = 0x11090601;
+    for (size_t i = 0; i < 4; i++) {
+        ulong u; uint m = 1 << (r & 255); r >>= 8;
+        d = d * 3.14159265358979323846;
+        d = d + 2.7182818284590452354;
+        lr.out.d = d; u = lr.out.ul; if (u < m) u += m; lr.state[i] = u;
+    }
+    return lr;
+}
+inline lrandom diag_randomseed_nofp64(double d) {     // 4x(mul,add) -> int mix
+    lrandom lr;
+    ulong b = as_ulong(d);
+    uint r = 0x11090601;
+    for (size_t i = 0; i < 4; i++) {
+        uint m = 1 << (r & 255); r >>= 8;
+        b ^= b >> 33; b *= 0xff51afd7ed558ccdUL; b ^= b >> 29;
+        if (b < m) b += m;
+        lr.state[i] = b;
+    }
+    for (size_t i = 0; i < 10; i++) _randint(&lr);
+    return lr;
+}
+// (E5) During randomseed's 10 warmup rounds, _randint also maintains the XOR
+//      accumulator r and stores it to lr->out.ul. Nothing reads out.ul between
+//      the warmup and the next real _randint inside l_random/randdblmem, which
+//      overwrites it, so all 10 rounds' r work is dead. Advancing state only
+//      drops 4 64-bit XORs and one 64-bit store per warmup round -- 40 XORs and
+//      10 stores per draw -- and is exact by construction (no observed value
+//      changes). Whether it wins depends on whether the compiler already
+//      eliminated it, which is exactly what this fixture measures.
+inline void diag_randint_state_only(lrandom* lr) {
+    ulong z;
+    z = lr->state[0];
+    z = (((z<<31)^z)>>45)^((z&((ulong)(long)-1<<1))<<18);
+    lr->state[0] = z;
+    z = lr->state[1];
+    z = (((z<<19)^z)>>30)^((z&((ulong)(long)-1<<6))<<28);
+    lr->state[1] = z;
+    z = lr->state[2];
+    z = (((z<<24)^z)>>48)^((z&((ulong)(long)-1<<9))<<7);
+    lr->state[2] = z;
+    z = lr->state[3];
+    z = (((z<<21)^z)>>39)^((z&((ulong)(long)-1<<17))<<8);
+    lr->state[3] = z;
+}
+inline lrandom diag_randomseed_leanwarm(double d) {
+    lrandom lr;
+    uint r = 0x11090601;
+    for (size_t i = 0; i < 4; i++) {
+        ulong u; uint m = 1 << (r & 255); r >>= 8;
+        d = d * 3.14159265358979323846;
+        d = d + 2.7182818284590452354;
+        lr.out.d = d; u = lr.out.ul; if (u < m) u += m; lr.state[i] = u;
+    }
+    for (size_t i = 0; i < 10; i++) diag_randint_state_only(&lr);
+    return lr;
+}
+
+inline ulong diag_xorshift64(ulong x) {
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17; return x;
+}
+
+inline double dns_rng_node_advance_scalar(instance* inst, double* state) {
+#if defined(DIAG_VARIANT_EXACT)
+    *state = diag_round13(diag_fract23(*state * 1.72431234 + 2.134453429141));
+    return *state + inst->hashedSeed;              // caller applies pi/2
+#elif defined(DIAG_VARIANT_NOROUND)
+    *state = fract(*state * 1.72431234 + 2.134453429141);   // no round/div_1e13
+    return (*state + inst->hashedSeed) / 2;
+#elif defined(DIAG_VARIANT_INTSTATE)
+    ulong k = diag_xorshift64(as_ulong(*state) | 1UL);
+    *state = as_double((k >> 12) | 0x3FF0000000000000UL) - 1.0;
+    return (*state + inst->hashedSeed) / 2;
+#else
+    *state = roundDigits(fract(*state * 1.72431234 + 2.134453429141), 13);
+    return (*state + inst->hashedSeed) / 2;
+#endif
+}
+
+// Seed a scratch lrandom off a scalar stream.
+inline void dns_seed_scalar(instance* inst, double* state, lrandom* scratch) {
+#if defined(DIAG_VARIANT_EXACT)
+    *scratch = diag_randomseed_x2(dns_rng_node_advance_scalar(inst, state));
+#elif defined(DIAG_VARIANT_NOWARMUP)
+    *scratch = diag_randomseed_nowarmup(dns_rng_node_advance_scalar(inst, state));
+#elif defined(DIAG_VARIANT_NOSEEDFP)
+    *scratch = diag_randomseed_nofp64(dns_rng_node_advance_scalar(inst, state));
+#elif defined(DIAG_VARIANT_LEANWARM)
+    *scratch = diag_randomseed_leanwarm(dns_rng_node_advance_scalar(inst, state));
+#elif defined(DIAG_VARIANT_NORNGCORE)
+    double s = dns_rng_node_advance_scalar(inst, state);
+    ulong k = diag_xorshift64(as_ulong(s) | 1UL);
+    scratch->state[0] = k; scratch->state[1] = k ^ 0x9e3779b97f4a7c15UL;
+    scratch->state[2] = k * 3UL + 1UL; scratch->state[3] = ~k | 2UL;
+    scratch->out.ul = k;
+#else
+    *scratch = randomseed(dns_rng_node_advance_scalar(inst, state));
+#endif
+}
+
+// One seeded draw off a scalar stream.
 inline double dns_random_scalar(
     instance* inst,
     double* state,
     lrandom* scratch
 ) {
-    *scratch = randomseed(dns_rng_node_advance_scalar(inst, state));
+#if defined(DIAG_VARIANT_NORNGCORE)
+    // Whole RNG core deleted: state advance kept, randomseed+l_random gone.
+    double s = dns_rng_node_advance_scalar(inst, state);
+    ulong k = diag_xorshift64(as_ulong(s) | 1UL);
+    scratch->state[0] = k;
+    return as_double((k >> 12) | 0x3FF0000000000000UL) - 1.0;
+#else
+    dns_seed_scalar(inst, state, scratch);
     return l_random(scratch);
+#endif
 }
 
 inline rarity dns_joker_rarity_scalar(
@@ -157,10 +348,18 @@ inline rarity dns_joker_rarity_scalar(
     double* state,
     lrandom* scratch
 ) {
+#if defined(DIAG_VARIANT_EXACT)
+    dns_seed_scalar(inst, state, scratch);
+    ulong m = diag_l_random_mantissa(scratch);
+    if (m > DIAG_THR_0_95) return Rarity_Rare;
+    if (m > DIAG_THR_0_70) return Rarity_Uncommon;
+    return Rarity_Common;
+#else
     double poll = dns_random_scalar(inst, state, scratch);
     if (poll > 0.95) return Rarity_Rare;
     if (poll > 0.7) return Rarity_Uncommon;
     return Rarity_Common;
+#endif
 }
 
 inline bool dns_joker_negative_scalar(
@@ -168,7 +367,12 @@ inline bool dns_joker_negative_scalar(
     double* state,
     lrandom* scratch
 ) {
+#if defined(DIAG_VARIANT_EXACT)
+    dns_seed_scalar(inst, state, scratch);
+    return diag_l_random_mantissa(scratch) > DIAG_THR_0_997;
+#else
     return dns_random_scalar(inst, state, scratch) > 0.997;
+#endif
 }
 
 inline bool dns_index_locked(int index, ulong lockedLow, ulong lockedHigh) {
@@ -187,7 +391,7 @@ inline int dns_shop_randindex_scalar(
     ulong lockedLow,
     ulong lockedHigh
 ) {
-    *scratch = randomseed(dns_rng_node_advance_scalar(inst, state));
+    dns_seed_scalar(inst, state, scratch);
     int index = (int)l_randint(scratch, 1, itemCount);
     if (!inst->params.showman &&
         dns_index_locked(index, lockedLow, lockedHigh)) {
@@ -223,27 +427,7 @@ inline void dns_joker(instance* inst, rsrc src, int ante, dns_counts* c, item* d
     dns_joker_from_rarity(inst, src, ante, next_joker_rarity(inst, src, ante), c, drawn);
 }
 
-// DIAG_BALLAST_KB adds N KB of otherwise-unused private memory to the kernel
-// frame, to measure how per-work-item footprint alone affects throughput. It
-// changes nothing else: the same draws, the same ALU, the same cache traffic.
-// The array is volatile and is written and read at two seed-dependent indices
-// the compiler cannot bound, so it cannot be scalarised away; the value read is
-// always the value written, so the returned score stays bit-identical to a
-// DIAG_BALLAST_KB=0 build. Diagnostic only - see tests/diag_mem.json.
-#ifndef DIAG_BALLAST_KB
-#define DIAG_BALLAST_KB 0
-#endif
-#define DIAG_BALLAST_WORDS (DIAG_BALLAST_KB * 128)
-#define DIAG_BALLAST_MAGIC 0x5A5A5A5A5A5A5A5AUL
-
 long filter(instance* inst) {
-#if DIAG_BALLAST_KB > 0
-    volatile ulong diag_ballast[DIAG_BALLAST_WORDS];
-    uint diag_bi = (uint)(inst->seed.data[0] * 31UL + inst->seed.data[1]) % (uint)DIAG_BALLAST_WORDS;
-    uint diag_bj = (uint)(inst->seed.data[2] * 17UL + inst->seed.data[3] + 1UL) % (uint)DIAG_BALLAST_WORDS;
-    diag_ballast[diag_bi] = DIAG_BALLAST_MAGIC;
-    diag_ballast[diag_bj] = DIAG_BALLAST_MAGIC;
-#endif
     for (int i = 0; i < (int)(sizeof(DNS_UPGRADE_VOUCHERS) / sizeof(item)); i++) i_lock(inst, DNS_UPGRADE_VOUCHERS[i]);
     DNS_APPLY_LOCKS(DNS_LOCKED_COMMONS, i_lock)
     DNS_APPLY_LOCKS(DNS_LOCKED_UNCOMMONS, i_lock)
@@ -410,13 +594,6 @@ long filter(instance* inst) {
             for (int j = 0; j < _pack.size; j++) i_unlock(inst, drawn[j]);
         }
     }
-#if DIAG_BALLAST_KB > 0
-    // Always 0: diag_bj was written with the magic above. Keeps the ballast
-    // live across the whole ante loop without perturbing the score.
-    long diag_extra = (diag_ballast[diag_bj] == DIAG_BALLAST_MAGIC) ? 0L : 1L;
-#else
-    long diag_extra = 0L;
-#endif
     return (long)c.copy * 1000000000000L + (long)c.uncommon * 1000000000L + (long)c.other * 1000000L
-         + (long)firstTagNeg * 1000L + (long)secondTagNeg + diag_extra;
+         + (long)firstTagNeg * 1000L + (long)secondTagNeg;
 }

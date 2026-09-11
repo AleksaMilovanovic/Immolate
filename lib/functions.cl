@@ -651,6 +651,10 @@ void sort_deck(item array[], int arrayLength) {
     }
 }
 
+// Deck path. Guarded by INSTANCE_NO_DECK, the footprint switch that drops
+// params.deckCards[52]: a filter that defines it and still calls the deck path
+// gets a compile error here rather than reading a missing array.
+#ifndef INSTANCE_NO_DECK
 void init_erratic_deck(instance* inst) {
     // Draw the 52 cards (RNG call order must stay exactly as the game does it),
     // counting each card as it is drawn. Every value is one of the 52
@@ -714,6 +718,7 @@ void init_deck(instance* inst, item out[]) {
         out[index] = inst->params.deckCards[index];
     }
 }
+#endif // INSTANCE_NO_DECK
 void set_deck(instance* inst, item deck) {
     inst->params.deck = deck;
     if (deck == Zodiac_Deck) {
@@ -726,6 +731,7 @@ void set_stake(instance* inst, item stake) {
     inst->params.stake = stake;
 }
 
+#ifndef INSTANCE_NO_DECK
 void shuffle_deck(instance* inst, item deck[], int ante) {
     init_deck(inst, deck);
     inst->rng = randomseed(get_node_child(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Shuffle_New_Round, ante}, 2));
@@ -749,6 +755,7 @@ void next_hand_drawn(instance* inst, item hand[], int ante) {
         hand[i] = deck[cardIndex];
     }
 }
+#endif // INSTANCE_NO_DECK
 
 // Note: This is generated once for every blind, regardless of whether it has an Orbital Tag (even Boss Blinds)
 item next_orbital_tag(instance* inst) {

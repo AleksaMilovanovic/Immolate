@@ -43,12 +43,30 @@ class CaseFailure(RuntimeError):
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("smoke", "quick", "correctness", "breadth", "benchmark", "all"), default="all")
+    parser.add_argument(
+        "--profile",
+        choices=(
+            "smoke", "quick", "correctness", "breadth", "benchmark", "all",
+            # Diagnostic profiles, defined in tests/diagnostics.json. They select
+            # ablation fixtures that deliberately produce wrong scores, so they
+            # only ever run benchmark-kind cases and never touch tests/golden/.
+            "diag-stage1", "diag-rng", "diag-mem", "diag-dns", "diag-all",
+        ),
+        default="all",
+    )
     parser.add_argument("--scale", choices=("auto", "pocl", "rtx5080"), default="auto")
     parser.add_argument("--platform", type=int, default=0)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--results", type=Path)
     parser.add_argument("--repeat", type=int, help="override measured benchmark repetitions")
+    parser.add_argument(
+        "--count-scale",
+        type=float,
+        default=1.0,
+        help="multiply every benchmark seed count by this factor (e.g. 0.25 to shorten a run, "
+             "4 to lengthen it). Counts stay >= 1. Use it to trade wall time against precision "
+             "without editing the cases file.",
+    )
     parser.add_argument("--timeout", type=float, default=600.0, help="per-command timeout in seconds")
     parser.add_argument("--batch", type=int, help="override score/prefilter batch size")
     parser.add_argument("--exe", type=Path)
@@ -280,9 +298,13 @@ def run_supplier_pipeline(case: dict, ctx: dict, case_dir: Path) -> tuple[dict, 
 
 
 def run_benchmark(case: dict, ctx: dict, case_dir: Path) -> tuple[dict, dict]:
-    count = int(resolve_value(case["count"], ctx["scale"]))
+    count = max(1, int(resolve_value(case["count"], ctx["scale"]) * ctx["count_scale"]))
     command = base_command(ctx["exe"], ctx["platform"], ctx["device"], case["filter"])
     command += ["-s", case["seed"], "-n", str(count), "-c", str(case["cutoff"]), "--batch", str(ctx["batch"])]
+    # Optional extra CLI arguments, e.g. ["-g", "4096"] for a launch-geometry
+    # sweep. A case that sets these is comparable only against another case with
+    # the same filter, so `compare_to` still carries the meaning.
+    command += [str(a) for a in case.get("args", [])]
     warm = run_checked(command, repo_root=ctx["repo"], timeout=ctx["timeout"], case_dir=case_dir, name="warmup")
     if parse_score_records(warm.stdout):
         raise CaseFailure("benchmark warmup unexpectedly printed result records")
@@ -293,6 +315,8 @@ def run_benchmark(case: dict, ctx: dict, case_dir: Path) -> tuple[dict, dict]:
             raise CaseFailure("benchmark unexpectedly printed result records")
         samples.append(result.wall_ns)
     canonical = {"type": "benchmark", "filter": case["filter"], "count": count, "cutoff": int(case["cutoff"])}
+    if case.get("args"):
+        canonical["args"] = [str(a) for a in case["args"]]
     return canonical, {"timing": timing_summary(samples), "warmup_seconds": warm.wall_ns / 1_000_000_000}
 
 
@@ -428,6 +452,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.batch is not None and args.batch < 1:
         print("--batch must be positive", file=sys.stderr)
         return 2
+    if args.count_scale <= 0:
+        print("--count-scale must be positive", file=sys.stderr)
+        return 2
 
     try:
         sha = git_capture(repo, "rev-parse", "HEAD")
@@ -473,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
             "cases_sha256": sha256_file(cases_path),
             "batch": batch,
             "benchmark_repeats": repeats,
+            "count_scale": args.count_scale,
             "host": host_metadata(),
             "argv": sys.argv,
         }
@@ -486,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
             "scale": scale,
             "batch": batch,
             "repeats": repeats,
+            "count_scale": args.count_scale,
             "timeout": args.timeout,
             "discard_scores": args.discard_scores,
             "update_golden": args.update_golden,

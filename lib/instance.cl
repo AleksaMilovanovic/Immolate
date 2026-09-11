@@ -1,12 +1,19 @@
 // Contains settings used for different packs
 // Level means level of the voucher, level 0 -> no voucher, level 1 -> base voucher, level 2 -> upgraded voucher
+// INSTANCE_NO_DECK drops the 52-item starting-deck array from the per-work-item
+// instance. It is a private-memory footprint switch for filters that never call
+// the deck path (init_deck / get_deck / anything reading params.deckCards); such
+// a filter would fail to compile rather than read a missing array, so the switch
+// cannot silently change results. Undefined by default: layout is unchanged.
 typedef struct InstanceParameters {
     item deck;
     item stake;
     bool vouchers[32];
     bool showman;
 
+#ifndef INSTANCE_NO_DECK
     item deckCards[52];
+#endif
     int deckSize;
     int handSize;
 } instance_params;
@@ -75,9 +82,11 @@ void i_init(instance* inst, seed s) {
     for (int i = 0; i < 32; i++) {
         inst->params.vouchers[i] = false;
     }
+#ifndef INSTANCE_NO_DECK
     for (int i = 0; i < 52; i++) {
         inst->params.deckCards[i] = RETRY;
     }
+#endif
     inst->params.deckSize = 52;
     inst->params.handSize = 8;
 }

@@ -47,7 +47,8 @@ _HOST_LINE_PATTERNS = (
     re.compile(r"^Launching [0-9]+ work-groups "),
     re.compile(r"^Work-group size [0-9]+ rejected "),
     re.compile(r"^Starting searcher\.\.\.$"),
-    re.compile(r"^Done in [0-9.eE+-]+s$"),
+    # "Done in <wall>s" and, since the wall/CPU split, "Done in <wall>s (cpu <cpu>s)".
+    re.compile(r"^Done in [0-9.eE+-]+s( \(cpu [0-9.eE+-]+s\))?$"),
     re.compile(r"^This driver rejected -cl-nv-verbose "),
 )
 
