@@ -128,15 +128,37 @@ typedef struct DnsCounts {
     int copy, uncommon, other;
 } dns_counts;
 
-inline rarity dns_joker_rarity_bound(instance* inst, rng_node_id node_id) {
-    double poll = random_bound(inst, node_id);
+inline double dns_rng_node_advance_scalar(instance* inst, double* state) {
+    *state = roundDigits(fract(*state * 1.72431234 + 2.134453429141), 13);
+    return (*state + inst->hashedSeed) / 2;
+}
+
+inline double dns_random_scalar(
+    instance* inst,
+    double* state,
+    lrandom* scratch
+) {
+    *scratch = randomseed(dns_rng_node_advance_scalar(inst, state));
+    return l_random(scratch);
+}
+
+inline rarity dns_joker_rarity_scalar(
+    instance* inst,
+    double* state,
+    lrandom* scratch
+) {
+    double poll = dns_random_scalar(inst, state, scratch);
     if (poll > 0.95) return Rarity_Rare;
     if (poll > 0.7) return Rarity_Uncommon;
     return Rarity_Common;
 }
 
-inline bool dns_joker_negative_bound(instance* inst, rng_node_id node_id) {
-    return random_bound(inst, node_id) > 0.997;
+inline bool dns_joker_negative_scalar(
+    instance* inst,
+    double* state,
+    lrandom* scratch
+) {
+    return dns_random_scalar(inst, state, scratch) > 0.997;
 }
 
 inline bool dns_index_locked(int index, ulong lockedLow, ulong lockedHigh) {
@@ -145,17 +167,18 @@ inline bool dns_index_locked(int index, ulong lockedLow, ulong lockedHigh) {
     return (lockedHigh >> (bit - 64)) & 1UL;
 }
 
-inline int dns_shop_randindex_bound(
+inline int dns_shop_randindex_scalar(
     instance* inst,
-    rng_node_id node_id,
+    double* state,
+    lrandom* scratch,
     rtype rngType,
     int ante,
     int itemCount,
     ulong lockedLow,
     ulong lockedHigh
 ) {
-    inst->rng = randomseed(rng_node_advance(inst, node_id));
-    int index = (int)l_randint(&(inst->rng), 1, itemCount);
+    *scratch = randomseed(dns_rng_node_advance_scalar(inst, state));
+    int index = (int)l_randint(scratch, 1, itemCount);
     if (!inst->params.showman &&
         dns_index_locked(index, lockedLow, lockedHigh)) {
         int resampleNum = 1;
@@ -164,6 +187,7 @@ inline int dns_shop_randindex_bound(
                 (__private ntype[]){N_Type, N_Source, N_Ante, N_Resample},
                 (__private int[]){rngType, S_Shop, ante, resampleNum},
                 4, 1, itemCount);
+            *scratch = inst->rng;
             resampleNum++;
         }
     }
@@ -250,13 +274,17 @@ long filter(instance* inst) {
         rng_node_id cardTypeNode = rng_node_resolve(inst,
             (__private ntype[]){N_Type, N_Ante},
             (__private int[]){R_Card_Type, ante}, 2);
+        double cardTypeState = inst->rngCache.nodes[cardTypeNode].rngState;
+        lrandom shopRng;
         // Raw shop streams have no frame-local locks, so count card types first
         // and consume the independent Joker streams densely afterward.
         int jokerCards = 0;
         for (int i = 0; i < cards; i++) {
-            double card_type = random_bound(inst, cardTypeNode) * totalRate;
+            double card_type = dns_random_scalar(inst,
+                &cardTypeState, &shopRng) * totalRate;
             jokerCards += get_item_type(shopInstance, card_type) == ItemType_Joker;
         }
+        inst->rngCache.nodes[cardTypeNode].rngState = cardTypeState;
         if (jokerCards > 0) {
             rng_node_id shopRarityNode = rng_node_resolve(inst,
                 (__private ntype[]){N_Type, N_Ante, N_Source},
@@ -264,8 +292,13 @@ long filter(instance* inst) {
             rng_node_id shopEditionNode = rng_node_resolve(inst,
                 (__private ntype[]){N_Type, N_Source, N_Ante},
                 (__private int[]){R_Joker_Edition, S_Shop, ante}, 3);
+            double shopRarityState =
+                inst->rngCache.nodes[shopRarityNode].rngState;
+            double shopEditionState =
+                inst->rngCache.nodes[shopEditionNode].rngState;
             rng_node_id shopUncommonNode = RNG_NODE_INVALID;
             rng_node_id shopRareNode = RNG_NODE_INVALID;
+            double shopUncommonState = 0, shopRareState = 0;
 
             // Stage rarity and edition in warp-sized chunks, then consume each
             // identity stream densely while preserving its ordinal draw order.
@@ -275,8 +308,10 @@ long filter(instance* inst) {
                 int uncommonCount = 0, rareCount = 0;
 
                 for (int slot = 0; slot < chunkSize; slot++) {
-                    rarity r = dns_joker_rarity_bound(inst, shopRarityNode);
-                    bool negative = dns_joker_negative_bound(inst, shopEditionNode);
+                    rarity r = dns_joker_rarity_scalar(inst,
+                        &shopRarityState, &shopRng);
+                    bool negative = dns_joker_negative_scalar(inst,
+                        &shopEditionState, &shopRng);
 
                     if (r == Rarity_Common) {
                         c.other += negative;
@@ -293,12 +328,14 @@ long filter(instance* inst) {
                     shopUncommonNode = rng_node_resolve(inst,
                         (__private ntype[]){N_Type, N_Source, N_Ante},
                         (__private int[]){R_Joker_Uncommon, S_Shop, ante}, 3);
+                    shopUncommonState =
+                        inst->rngCache.nodes[shopUncommonNode].rngState;
                 }
                 for (int ordinal = 0; ordinal < uncommonCount; ordinal++) {
-                    int jokerIndex = dns_shop_randindex_bound(inst,
-                        shopUncommonNode, R_Joker_Uncommon, ante,
-                        uncommonItemCount, uncommonLockedLow,
-                        uncommonLockedHigh);
+                    int jokerIndex = dns_shop_randindex_scalar(inst,
+                        &shopUncommonState, &shopRng,
+                        R_Joker_Uncommon, ante, uncommonItemCount,
+                        uncommonLockedLow, uncommonLockedHigh);
                     if (jokerIndex == dietColaIndex) {
                         c.other++;
                     } else if ((uncommonNegative >> ordinal) & 1u) {
@@ -310,10 +347,11 @@ long filter(instance* inst) {
                     shopRareNode = rng_node_resolve(inst,
                         (__private ntype[]){N_Type, N_Source, N_Ante},
                         (__private int[]){R_Joker_Rare, S_Shop, ante}, 3);
+                    shopRareState = inst->rngCache.nodes[shopRareNode].rngState;
                 }
                 for (int ordinal = 0; ordinal < rareCount; ordinal++) {
-                    int jokerIndex = dns_shop_randindex_bound(inst,
-                        shopRareNode, R_Joker_Rare, ante,
+                    int jokerIndex = dns_shop_randindex_scalar(inst,
+                        &shopRareState, &shopRng, R_Joker_Rare, ante,
                         rareItemCount, rareLocked, 0UL);
                     if ((rareNegative >> ordinal) & 1u) {
                         if (jokerIndex == brainstormIndex ||
@@ -322,7 +360,15 @@ long filter(instance* inst) {
                     }
                 }
             }
+            inst->rngCache.nodes[shopRarityNode].rngState = shopRarityState;
+            inst->rngCache.nodes[shopEditionNode].rngState = shopEditionState;
+            if (shopUncommonNode != RNG_NODE_INVALID)
+                inst->rngCache.nodes[shopUncommonNode].rngState =
+                    shopUncommonState;
+            if (shopRareNode != RNG_NODE_INVALID)
+                inst->rngCache.nodes[shopRareNode].rngState = shopRareState;
         }
+        inst->rng = shopRng;
         for (int p = 0; p < DNS_PACKS; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
             if (_pack.type != Buffoon_Pack) continue;

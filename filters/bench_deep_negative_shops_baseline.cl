@@ -139,24 +139,35 @@ inline bool dns_joker_negative_bound(instance* inst, rng_node_id node_id) {
     return random_bound(inst, node_id) > 0.997;
 }
 
-inline item dns_shop_randchoice_bound(
+inline bool dns_index_locked(int index, ulong lockedLow, ulong lockedHigh) {
+    int bit = index - 1;
+    if (bit < 64) return (lockedLow >> bit) & 1UL;
+    return (lockedHigh >> (bit - 64)) & 1UL;
+}
+
+inline int dns_shop_randindex_bound(
     instance* inst,
     rng_node_id node_id,
     rtype rngType,
     int ante,
-    __constant item items[]
+    int itemCount,
+    ulong lockedLow,
+    ulong lockedHigh
 ) {
     inst->rng = randomseed(rng_node_advance(inst, node_id));
-    item i = items[l_randint(&(inst->rng), 1, items[0])];
-    if (!inst->params.showman && i_locked(inst, i)) {
+    int index = (int)l_randint(&(inst->rng), 1, itemCount);
+    if (!inst->params.showman &&
+        dns_index_locked(index, lockedLow, lockedHigh)) {
         int resampleNum = 1;
-        while (i_locked(inst, i)) {
-            i = randchoice_resample(inst, rngType, S_Shop,
-                ante, items, resampleNum);
+        while (dns_index_locked(index, lockedLow, lockedHigh)) {
+            index = (int)randint(inst,
+                (__private ntype[]){N_Type, N_Source, N_Ante, N_Resample},
+                (__private int[]){rngType, S_Shop, ante, resampleNum},
+                4, 1, itemCount);
             resampleNum++;
         }
     }
-    return i;
+    return index;
 }
 
 // Classify one joker after its rarity draw: identity where needed, then edition.
@@ -186,6 +197,28 @@ long filter(instance* inst) {
     DNS_APPLY_LOCKS(DNS_UNLOCKED_COMMONS, i_unlock)
     DNS_APPLY_LOCKS(DNS_UNLOCKED_UNCOMMONS, i_unlock)
     DNS_APPLY_LOCKS(DNS_UNLOCKED_RARES, i_unlock)
+
+    int uncommonItemCount = (int)UNCOMMON_JOKERS[0];
+    int rareItemCount = (int)RARE_JOKERS[0];
+    ulong uncommonLockedLow = 0UL, uncommonLockedHigh = 0UL;
+    ulong rareLocked = 0UL;
+    int dietColaIndex = -1, blueprintIndex = -1, brainstormIndex = -1;
+    for (int index = 1; index <= uncommonItemCount; index++) {
+        item joker = UNCOMMON_JOKERS[index];
+        int bit = index - 1;
+        if (i_locked(inst, joker)) {
+            if (bit < 64) uncommonLockedLow |= 1UL << bit;
+            else uncommonLockedHigh |= 1UL << (bit - 64);
+        }
+        if (joker == Diet_Cola) dietColaIndex = index;
+    }
+    for (int index = 1; index <= rareItemCount; index++) {
+        item joker = RARE_JOKERS[index];
+        if (i_locked(inst, joker)) rareLocked |= 1UL << (index - 1);
+        if (joker == Blueprint) blueprintIndex = index;
+        if (joker == Brainstorm) brainstormIndex = index;
+    }
+
     shop shopInstance = get_shop_instance(inst);
     double totalRate = get_total_rate(shopInstance);
     bool overstock = false, overstockPlus = false;
@@ -262,10 +295,11 @@ long filter(instance* inst) {
                         (__private int[]){R_Joker_Uncommon, S_Shop, ante}, 3);
                 }
                 for (int ordinal = 0; ordinal < uncommonCount; ordinal++) {
-                    item joker = dns_shop_randchoice_bound(inst,
+                    int jokerIndex = dns_shop_randindex_bound(inst,
                         shopUncommonNode, R_Joker_Uncommon, ante,
-                        UNCOMMON_JOKERS);
-                    if (joker == Diet_Cola) {
+                        uncommonItemCount, uncommonLockedLow,
+                        uncommonLockedHigh);
+                    if (jokerIndex == dietColaIndex) {
                         c.other++;
                     } else if ((uncommonNegative >> ordinal) & 1u) {
                         c.uncommon++;
@@ -278,10 +312,12 @@ long filter(instance* inst) {
                         (__private int[]){R_Joker_Rare, S_Shop, ante}, 3);
                 }
                 for (int ordinal = 0; ordinal < rareCount; ordinal++) {
-                    item joker = dns_shop_randchoice_bound(inst,
-                        shopRareNode, R_Joker_Rare, ante, RARE_JOKERS);
+                    int jokerIndex = dns_shop_randindex_bound(inst,
+                        shopRareNode, R_Joker_Rare, ante,
+                        rareItemCount, rareLocked, 0UL);
                     if ((rareNegative >> ordinal) & 1u) {
-                        if (joker == Brainstorm || joker == Blueprint) c.copy++;
+                        if (jokerIndex == brainstormIndex ||
+                            jokerIndex == blueprintIndex) c.copy++;
                         else c.other++;
                     }
                 }

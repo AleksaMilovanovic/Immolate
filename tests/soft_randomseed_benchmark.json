@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "profiles": {
+    "smoke": ["benchmark"],
+    "quick": ["benchmark"],
+    "correctness": ["benchmark"],
+    "breadth": ["benchmark"],
+    "benchmark": ["benchmark"],
+    "all": ["benchmark"]
+  },
+  "scales": {
+    "pocl": {
+      "batch": 65536,
+      "benchmark_repeats": 7
+    },
+    "rtx5080": {
+      "batch": 1048576,
+      "benchmark_repeats": 7
+    }
+  },
+  "cases": [
+    {
+      "id": "baseline-native-randomseed",
+      "kind": "benchmark",
+      "tags": ["benchmark"],
+      "filter": "bench_rng_int",
+      "seed": "11111111",
+      "count": {
+        "pocl": 10000,
+        "rtx5080": 500000000
+      },
+      "cutoff": 11
+    },
+    {
+      "id": "candidate-soft-randomseed",
+      "kind": "benchmark",
+      "tags": ["benchmark"],
+      "filter": "bench_rng_soft",
+      "seed": "11111111",
+      "count": {
+        "pocl": 10000,
+        "rtx5080": 500000000
+      },
+      "cutoff": 11,
+      "compare_to": "baseline-native-randomseed"
+    }
+  ]
+}
