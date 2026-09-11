@@ -128,18 +128,6 @@ typedef struct DnsCounts {
     int copy, uncommon, other;
 } dns_counts;
 
-#define DNS_LUA_MANTISSA_MASK 0x000FFFFFFFFFFFFFUL
-#define DNS_JOKER_RAW_LIMIT   0x000B6DB6DB6DB6DCUL
-
-// This filter's shop rates stay 20/28. l_random would map the next low 52
-// bits to m/2^52, so its old strict product test is exactly m < ceil(5*2^52/7).
-// _randint preserves the same RNG state; out is dead before the next reseed.
-inline bool dns_next_shop_card_is_joker(instance* inst, rng_node_id node_id) {
-    inst->rng = randomseed(rng_node_advance(inst, node_id));
-    _randint(&inst->rng);
-    return (inst->rng.out.ul & DNS_LUA_MANTISSA_MASK) < DNS_JOKER_RAW_LIMIT;
-}
-
 inline rarity dns_joker_rarity_bound(instance* inst, rng_node_id node_id) {
     double poll = random_bound(inst, node_id);
     if (poll > 0.95) return Rarity_Rare;
@@ -183,6 +171,8 @@ long filter(instance* inst) {
     DNS_APPLY_LOCKS(DNS_UNLOCKED_COMMONS, i_unlock)
     DNS_APPLY_LOCKS(DNS_UNLOCKED_UNCOMMONS, i_unlock)
     DNS_APPLY_LOCKS(DNS_UNLOCKED_RARES, i_unlock)
+    shop shopInstance = get_shop_instance(inst);
+    double totalRate = get_total_rate(shopInstance);
     bool overstock = false, overstockPlus = false;
     dns_counts c = {0, 0, 0};
     int firstTagNeg = 0, secondTagNeg = 0;
@@ -216,7 +206,8 @@ long filter(instance* inst) {
         // and consume the independent Joker streams densely afterward.
         int jokerCards = 0;
         for (int i = 0; i < cards; i++) {
-            jokerCards += dns_next_shop_card_is_joker(inst, cardTypeNode);
+            double card_type = random_bound(inst, cardTypeNode) * totalRate;
+            jokerCards += get_item_type(shopInstance, card_type) == ItemType_Joker;
         }
         if (jokerCards > 0) {
             rng_node_id shopRarityNode = rng_node_resolve(inst,
