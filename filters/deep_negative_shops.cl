@@ -37,11 +37,36 @@
 // scores as other regardless of identity. Uncommon/Rare shop identities and all
 // Buffoon identities are still drawn because their values affect the score or
 // temporary within-pack locks.
-// 1024 nodes overflowed on ~2% of pool seeds once the joker locks were added:
-// every locked joker that comes up costs a resample node per rarity, ante and
-// reroll depth. 2048 covers every seed seen in a 3000-seed sample with room.
-#define CACHE_SIZE 2048
+// Older versions used one global shop-pack RNG stream, so only versions whose
+// pack node includes the ante may discard completed-ante nodes.
+#define DNS_VERSION_AT_MOST(v1,v2,v3,v4) \
+    ((VER1 < v1) || (VER1 == v1 && ((VER2 < v2) || \
+    (VER2 == v2 && ((VER3 < v3) || (VER3 == v3 && VER4 <= v4))))))
+#ifndef GAME_VERSION
+    #define DNS_ANTE_LOCAL_CACHE 1
+#elif VER1 == 0 || defined(DEMO)
+    #if DNS_VERSION_AT_MOST(0,9,3,12)
+        #define DNS_ANTE_LOCAL_CACHE 0
+    #else
+        #define DNS_ANTE_LOCAL_CACHE 1
+    #endif
+#else
+    #if DNS_VERSION_AT_MOST(1,0,0,2)
+        #define DNS_ANTE_LOCAL_CACHE 0
+    #else
+        #define DNS_ANTE_LOCAL_CACHE 1
+    #endif
+#endif
+
+// Across 20,480 stratified seeds the per-ante peak was 80 nodes (p99 51).
+// Keep legacy global-pack versions at the original cumulative capacity.
+#if DNS_ANTE_LOCAL_CACHE
+    #define CACHE_SIZE 256
+#else
+    #define CACHE_SIZE 2048
+#endif
 #include "lib/immolate.cl"
+#undef DNS_VERSION_AT_MOST
 
 // ---------------------------------------------------------------------------
 // Joker locks. A locked joker cannot appear: when the game rolls one it
@@ -153,6 +178,12 @@ long filter(instance* inst) {
     int firstTagNeg = 0, secondTagNeg = 0;
 
     for (int ante = 1; ante <= DNS_LAST_ANTE; ante++) {
+#if DNS_ANTE_LOCAL_CACHE
+        // Every reachable node in this version is ante-keyed. Keep persistent
+        // cache flags and seed-hash state; only discard unreachable node slots.
+        inst->rngCache.nextFreeNode = 0;
+        inst->rngCache.lastNode = -1;
+#endif
         item v = next_voucher(inst, ante);
         for (int i = 0; i < (int)(sizeof(DNS_BOUGHT_VOUCHERS) / sizeof(item)); i++) {
             if (DNS_BOUGHT_VOUCHERS[i] == v) { activate_voucher(inst, v); break; }
