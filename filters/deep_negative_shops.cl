@@ -32,9 +32,11 @@
 //
 // Draws skipped, all exact (same reasoning as wr_filter): consumable identities
 // for non-joker slots, and the sticker and rental polls, which live on their
-// own nodes and cannot fire at White Stake. Every joker's rarity, identity and
-// edition is drawn: Diet Cola is Uncommon, copy jokers are Rare, and the
-// identity streams are shared across the ante, so none can be skipped.
+// own nodes and cannot fire at White Stake. Common shop identities are also
+// skipped: Diet Cola is Uncommon, copy jokers are Rare, so every Negative Common
+// scores as other regardless of identity. Uncommon/Rare shop identities and all
+// Buffoon identities are still drawn because their values affect the score or
+// temporary within-pack locks.
 // 1024 nodes overflowed on ~2% of pool seeds once the joker locks were added:
 // every locked joker that comes up costs a resample node per rarity, ante and
 // reroll depth. 2048 covers every seed seen in a 3000-seed sample with room.
@@ -123,6 +125,15 @@ inline void dns_joker_from_rarity(instance* inst, rsrc src, int ante, rarity r, 
     else c->other++;
 }
 
+inline void dns_shop_joker_from_rarity(instance* inst, int ante, rarity r, dns_counts* c) {
+    if (r == Rarity_Common) {
+        if (next_joker_edition(inst, S_Shop, ante) == Negative) c->other++;
+        return;
+    }
+    item unused;
+    dns_joker_from_rarity(inst, S_Shop, ante, r, c, &unused);
+}
+
 inline void dns_joker(instance* inst, rsrc src, int ante, dns_counts* c, item* drawn) {
     dns_joker_from_rarity(inst, src, ante, next_joker_rarity(inst, src, ante), c, drawn);
 }
@@ -169,9 +180,8 @@ long filter(instance* inst) {
                     (__private ntype[]){N_Type, N_Ante, N_Source},
                     (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
             }
-            item unused;
-            dns_joker_from_rarity(inst, S_Shop, ante,
-                dns_joker_rarity_bound(inst, shopRarityNode), &c, &unused);
+            dns_shop_joker_from_rarity(inst, ante,
+                dns_joker_rarity_bound(inst, shopRarityNode), &c);
         }
         for (int p = 0; p < DNS_PACKS; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
