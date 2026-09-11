@@ -202,17 +202,21 @@ long filter(instance* inst) {
         rng_node_id cardTypeNode = rng_node_resolve(inst,
             (__private ntype[]){N_Type, N_Ante},
             (__private int[]){R_Card_Type, ante}, 2);
-        rng_node_id shopRarityNode = RNG_NODE_INVALID;
+        // Raw shop streams have no frame-local locks, so count card types first
+        // and consume the independent Joker streams densely afterward.
+        int jokerCards = 0;
         for (int i = 0; i < cards; i++) {
             double card_type = random_bound(inst, cardTypeNode) * totalRate;
-            if (get_item_type(shopInstance, card_type) != ItemType_Joker) continue;
-            if (shopRarityNode == RNG_NODE_INVALID) {
-                shopRarityNode = rng_node_resolve(inst,
-                    (__private ntype[]){N_Type, N_Ante, N_Source},
-                    (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
+            jokerCards += get_item_type(shopInstance, card_type) == ItemType_Joker;
+        }
+        if (jokerCards > 0) {
+            rng_node_id shopRarityNode = rng_node_resolve(inst,
+                (__private ntype[]){N_Type, N_Ante, N_Source},
+                (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
+            for (int i = 0; i < jokerCards; i++) {
+                dns_shop_joker_from_rarity(inst, ante,
+                    dns_joker_rarity_bound(inst, shopRarityNode), &c);
             }
-            dns_shop_joker_from_rarity(inst, ante,
-                dns_joker_rarity_bound(inst, shopRarityNode), &c);
         }
         for (int p = 0; p < DNS_PACKS; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
