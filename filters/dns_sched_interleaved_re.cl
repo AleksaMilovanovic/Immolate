@@ -1,3 +1,62 @@
+// =========================================================================
+// DIAGNOSTIC FIXTURE - SCHEDULING ONLY. Scores are CORRECT and must be
+// bit-identical to deep_negative_shops.cl. Part of the DNS benchmark pack.
+//
+// NAMING NOTE - READ THIS. The brief asked to "interleave the rarity and
+// edition polls rather than running them as two sequential staged passes".
+// The shipped filter ALREADY interleaves them: its staging loop draws one
+// rarity then one edition per slot. Building the literal request would be a
+// no-op. This fixture therefore measures the same axis from the other side:
+// it SPLITS the two polls into two sequential passes over the chunk. A ratio
+// of x here is a ratio of 1/x for the interleaving the shipped code does.
+//
+// WHAT MOVES: pass 1 draws chunkSize rarity polls, pass 2 draws chunkSize
+// edition polls and classifies. Same chunking, same slots, same draw count.
+// Staged rarity is carried in two dns_mask bitmaps (2 * DNS_MASK_WORDS
+// ulongs, 2 bits per slot) rather than a per-slot byte array, to keep the
+// private-memory footprint as small as the encoding allows.
+//
+// CONFOUND - READ BEFORE INTERPRETING. Those two masks are extra LIVE state,
+// and DNS_MASK_WORDS scales with DNS_CHUNK. At the current default of 512
+// each mask is 9 ulongs = 18 32-bit registers, so this fixture adds ~36
+// registers on top of the ~5 masks the shipped filter already keeps live.
+// That lands near the 128-register cap the base filter documents, so a
+// slowdown here may be a SPILL rather than a scheduling result. Check the
+// build log for spills (--verbose_build), and if there are any, re-run BOTH
+// this fixture and the shipped filter at -DDNS_CHUNK=128 and compare there.
+//
+// PER-NODE ORDER ARGUMENT: rarity names (R_Joker_Rarity, ante, S_Shop) and
+// edition names (R_Joker_Edition, S_Shop, ante) - two distinct nodes. Each
+// pass still walks slots 0..chunkSize-1 in increasing order, so each node
+// sees exactly its shipped sequence; only the interleaving between the two
+// streams changes. Classification is a pure function of (rarity, negative)
+// per slot and is unchanged, and the `c.other += negative` common tally is
+// an order-independent sum.
+//
+// PREDICTION: 0.95x-1.05x. Both polls are single draws with no resampling,
+// so neither form diverges; splitting trades one interleaved dependency
+// chain for two tighter ones at the cost of 16 bytes of live state. A ratio
+// below 1.00 would say the rarity->edition serial dependency in the shipped
+// staging loop is costing latency that batching hides.
+// =========================================================================
+// EXACTNESS MODEL (shared by every dns_sched_* fixture).
+// An RNG node is an independent stream: its state is seeded by
+// pseudohash(node name + seed) in rng_node_resolve and is advanced only by
+// draws naming that same node. Two draws can therefore only influence each
+// other when they name the SAME node. Reordering draws ACROSS nodes is free;
+// only the order WITHIN a node is load-bearing.
+//
+// Secondary state that could couple nodes, and why it does not:
+//   * inst->rng - every read of it in lib/ (random, randint, randchoice,
+//     randweightedchoice, random_bound, next_boss, shuffle_deck) is preceded
+//     by a write to it in the same call, so `inst->rng = shopRng` is dead for
+//     RNG purposes and carries nothing across a reordering.
+//   * the rngCache - node states are keyed by name, not by insertion order,
+//     and DNS_ANTE_LOCAL_CACHE only discards slots for antes that are
+//     finished. Every reachable node here is ante-keyed.
+//   * item locks - the shop path never mutates them; the pack path locks and
+//     unlocks its own draws within one pack.
+// =========================================================================
 // Deep shop scan, antes 3-38: negative jokers, Diet Colas and Negative Tags.
 // Meant to run over a seed-supplier pool (--from); at ~11,000 shop cards per
 // seed it is far too slow for a raw walk.
@@ -481,20 +540,29 @@ long filter(instance* inst) {
                 dnsm_clear(&uncommonNegative); dnsm_clear(&rareNegative);
                 int uncommonCount = 0, rareCount = 0;
 
+                // SCHEDULING PROBE: rarity for the whole chunk, then edition
+                // for the whole chunk, instead of one rarity + one edition per
+                // slot. Two masks carry the staged rarity; no extra draws.
+                dns_mask isUncommon, isRare;
+                dnsm_clear(&isUncommon); dnsm_clear(&isRare);
                 for (int slot = 0; slot < chunkSize; slot++) {
                     rarity r = dns_joker_rarity_scalar(inst,
                         &shopRarityState, &shopRng);
+                    if (r == Rarity_Uncommon) dnsm_set(&isUncommon, slot);
+                    else if (r == Rarity_Rare) dnsm_set(&isRare, slot);
+                }
+                for (int slot = 0; slot < chunkSize; slot++) {
                     bool negative = dns_joker_negative_scalar(inst,
                         &shopEditionState, &shopRng);
 
-                    if (r == Rarity_Common) {
-                        c.other += negative;
-                    } else if (r == Rarity_Uncommon) {
+                    if (dnsm_get(&isUncommon, slot)) {
                         if (negative) dnsm_set(&uncommonNegative, uncommonCount);
                         uncommonCount++;
-                    } else {
+                    } else if (dnsm_get(&isRare, slot)) {
                         if (negative) dnsm_set(&rareNegative, rareCount);
                         rareCount++;
+                    } else {
+                        c.other += negative;
                     }
                 }
 

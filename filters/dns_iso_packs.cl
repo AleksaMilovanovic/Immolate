@@ -1,3 +1,39 @@
+// ===========================================================================
+// DIAGNOSTIC FIXTURE - PRODUCES DELIBERATELY WRONG SCORES
+//
+// ISOLATING fixture.  Runs ONLY the pack streams: the per-ante DNS_PACKS pack
+// selection (R_Shop_Pack/<ante>) and, for the Buffoon packs among them, the
+// full contents draw -- rarity, identity with its lock-resample chain, and
+// edition, on S_Buffoon nodes -- plus the within-pack temporary locks the real
+// filter applies.  Standalone cost; diag_dns_abl_packs.cl gives the marginal.
+//
+// Stripped: every shop stream (card-type, rarity, edition, identities), tags.
+// Never wire this into tests/golden/.
+//
+// VOLUME FIDELITY -- how it was achieved:
+//   Nothing is approximated here.  Pack volume does not depend on the shop
+//   streams at all, so the real ante loop and the real pack block are kept
+//   VERBATIM: DNS_PACKS packs for each of antes 3..38, pack_info(), the
+//   Buffoon-only filter, _pack.size cards, dns_joker() on the real lib
+//   routines, and the real i_lock / i_unlock temporary-reroll dance that makes
+//   an earlier card in a pack shift the later ones' resample chains.  The only
+//   line dropped is `inst->rng = shopRng;`, which is dead: every following
+//   call reseeds inst->rng from its own node before reading it.
+//   Draws: 36 antes * DNS_PACKS(6) = 216 pack selections; Buffoon contents are
+//          3 draws per card (rarity, identity, edition) plus the identity's
+//          resamples, over however many of the 216 packs are Buffoon.
+//
+//   MEASURED (DNS_ISO_COUNT build, 2,048 seeds from 11111111):
+//          pack selections  216 on every single seed, min = max = 216 (target
+//                           216, exact -- it has no seed dependence at all)
+//          Buffoon contents mean 170  range 49..334   (target ~180, -5%)
+//          The contents range is by far the widest in the family (6.8x from min
+//          to max) because the number of Buffoon packs is itself a draw.
+//
+//   RETAINED DEPENDENCY: the voucher stream.  It changes no pack draw, but it
+//   is kept here too so all six fixtures share one spine and the gap
+//   arithmetic has a single correction term -- see dns_iso_cardtype.cl.
+// ===========================================================================
 // Deep shop scan, antes 3-38: negative jokers, Diet Colas and Negative Tags.
 // Meant to run over a seed-supplier pool (--from); at ~11,000 shop cards per
 // seed it is far too slow for a raw walk.
@@ -378,6 +414,69 @@ inline void dns_joker(instance* inst, rsrc src, int ante, dns_counts* c, item* d
 #define DIAG_BALLAST_WORDS (DIAG_BALLAST_KB * 128)
 #define DIAG_BALLAST_MAGIC 0x5A5A5A5A5A5A5A5AUL
 
+
+// ---------------------------------------------------------------------------
+// VOLUME VERIFICATION MODE (off by default, zero cost when off).
+// Build with  --build_opts "-D DNS_ISO_COUNT"  and the filter returns its draw
+// count instead of a score, packed as  primary * 1000000 + secondary.  Run with
+// a low -c to print every seed.  This is how the draw totals in the fixture
+// headers were measured; it is not part of the benchmark build.
+// ---------------------------------------------------------------------------
+#ifdef DNS_ISO_COUNT
+#define ISO_DECL   long isoDraws[2] = {0L, 0L};
+#define ISO_TALLY(i, n)  (isoDraws[i] += (long)(n))
+#define ISO_ARG    , isoDraws
+#define ISO_RETURN return isoDraws[0] * 1000000L + isoDraws[1] \
+    + (((c.copy | c.uncommon | c.other | firstTagNeg | secondTagNeg) \
+        == 0x7FFFFFFF) ? 1L : 0L);
+#else
+#define ISO_DECL
+#define ISO_TALLY(i, n)  ((void)0)
+#define ISO_ARG
+#define ISO_RETURN return (long)c.copy * 1000000000000L \
+    + (long)c.uncommon * 1000000000L + (long)c.other * 1000000L \
+    + (long)firstTagNeg * 1000L + (long)secondTagNeg + diag_extra;
+#endif
+
+#ifdef DNS_ISO_COUNT
+// Count-mode only transcription of lib's randchoice_common + the two polls in
+// dns_joker, so the Buffoon resample chain (which lives in lib/instance.cl and
+// is not ours to edit) can be counted.  The measured build never uses this and
+// calls the real lib routines instead.
+inline item dns_iso_counted_joker(instance* inst, rsrc src, int ante,
+                                  dns_counts* c, item* drawn, long* isoDraws) {
+    rarity r = next_joker_rarity(inst, src, ante);      // 1 draw
+    isoDraws[1]++;
+    rtype rt = (r == Rarity_Rare) ? R_Joker_Rare
+             : (r == Rarity_Uncommon) ? R_Joker_Uncommon : R_Joker_Common;
+    __constant item* pool = (r == Rarity_Rare) ? RARE_JOKERS
+                          : (r == Rarity_Uncommon) ? UNCOMMON_JOKERS : COMMON_JOKERS;
+    item joker = randchoice(inst, (__private ntype[]){N_Type, N_Source, N_Ante},
+                            (__private int[]){rt, src, ante}, 3, pool);
+    isoDraws[1]++;
+    if (!inst->params.showman && i_locked(inst, joker)) {
+        int resampleNum = 1;
+        while (i_locked(inst, joker)) {
+            joker = randchoice(inst,
+                (__private ntype[]){N_Type, N_Source, N_Ante, N_Resample},
+                (__private int[]){rt, src, ante, resampleNum}, 4, pool);
+            isoDraws[1]++;
+            resampleNum++;
+        }
+    }
+    item edition = next_joker_edition(inst, src, ante);  // 1 draw
+    isoDraws[1]++;
+    *drawn = joker;
+    if (joker == Diet_Cola) { c->other++; return joker; }
+    if (edition == Negative) {
+        if (joker == Brainstorm || joker == Blueprint) c->copy++;
+        else if (r == Rarity_Uncommon) c->uncommon++;
+        else c->other++;
+    }
+    return joker;
+}
+#endif
+
 long filter(instance* inst) {
 #if DIAG_BALLAST_KB > 0
     volatile ulong diag_ballast[DIAG_BALLAST_WORDS];
@@ -386,6 +485,11 @@ long filter(instance* inst) {
     diag_ballast[diag_bi] = DIAG_BALLAST_MAGIC;
     diag_ballast[diag_bj] = DIAG_BALLAST_MAGIC;
 #endif
+    ISO_DECL
+    // --- verbatim setup from deep_negative_shops.cl. Kept in full in every
+    // fixture: the voucher locks drive next_voucher's resample chain, which
+    // drives the Overstock sightings, which drive frame size, which drives the
+    // per-ante volume of every other stream. ~150 ALU ops per seed.
     for (int i = 0; i < (int)(sizeof(DNS_UPGRADE_VOUCHERS) / sizeof(item)); i++) i_lock(inst, DNS_UPGRADE_VOUCHERS[i]);
     DNS_APPLY_LOCKS(DNS_LOCKED_COMMONS, i_lock)
     DNS_APPLY_LOCKS(DNS_LOCKED_UNCOMMONS, i_lock)
@@ -423,8 +527,6 @@ long filter(instance* inst) {
 
     for (int ante = 1; ante <= DNS_LAST_ANTE; ante++) {
 #if DNS_ANTE_LOCAL_CACHE
-        // Every reachable node in this version is ante-keyed. Keep persistent
-        // cache flags and seed-hash state; only discard unreachable node slots.
         inst->rngCache.nextFreeNode = 0;
         inst->rngCache.lastNode = -1;
 #endif
@@ -436,122 +538,27 @@ long filter(instance* inst) {
         if (v == Overstock_Plus) overstockPlus = true;
         if (ante < DNS_FIRST_ANTE) continue;
 
-        if (next_tag(inst, ante) == Negative_Tag) firstTagNeg++;
-        if (next_tag(inst, ante) == Negative_Tag) secondTagNeg++;
-
-        int frameSize = 2;
-        if (overstock || ante >= 12) frameSize = 3;
-        if (overstockPlus || ante >= 24) frameSize = 4;
-        int cards = dns_frames(ante) * frameSize;
-        rng_node_id cardTypeNode = rng_node_resolve(inst,
-            (__private ntype[]){N_Type, N_Ante},
-            (__private int[]){R_Card_Type, ante}, 2);
-        double cardTypeState = inst->rngCache.nodes[cardTypeNode].rngState;
-        lrandom shopRng;
-        // Raw shop streams have no frame-local locks, so count card types first
-        // and consume the independent Joker streams densely afterward.
-        int jokerCards = 0;
-        for (int i = 0; i < cards; i++) {
-            double card_type = dns_random_scalar(inst,
-                &cardTypeState, &shopRng) * totalRate;
-            jokerCards += get_item_type(shopInstance, card_type) == ItemType_Joker;
-        }
-        inst->rngCache.nodes[cardTypeNode].rngState = cardTypeState;
-        if (jokerCards > 0) {
-            rng_node_id shopRarityNode = rng_node_resolve(inst,
-                (__private ntype[]){N_Type, N_Ante, N_Source},
-                (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
-            rng_node_id shopEditionNode = rng_node_resolve(inst,
-                (__private ntype[]){N_Type, N_Source, N_Ante},
-                (__private int[]){R_Joker_Edition, S_Shop, ante}, 3);
-            double shopRarityState =
-                inst->rngCache.nodes[shopRarityNode].rngState;
-            double shopEditionState =
-                inst->rngCache.nodes[shopEditionNode].rngState;
-            rng_node_id shopUncommonNode = RNG_NODE_INVALID;
-            rng_node_id shopRareNode = RNG_NODE_INVALID;
-            double shopUncommonState = 0, shopRareState = 0;
-
-            // Stage rarity and edition in DNS_CHUNK-slot chunks, then draw each
-            // identity pool depth-major. Every lane flushes at the same chunk
-            // boundary, so the flushes stay warp-aligned.
-            for (int base = 0; base < jokerCards; base += DNS_CHUNK) {
-                int chunkSize = min(DNS_CHUNK, jokerCards - base);
-                dns_mask uncommonNegative, rareNegative;
-                dnsm_clear(&uncommonNegative); dnsm_clear(&rareNegative);
-                int uncommonCount = 0, rareCount = 0;
-
-                for (int slot = 0; slot < chunkSize; slot++) {
-                    rarity r = dns_joker_rarity_scalar(inst,
-                        &shopRarityState, &shopRng);
-                    bool negative = dns_joker_negative_scalar(inst,
-                        &shopEditionState, &shopRng);
-
-                    if (r == Rarity_Common) {
-                        c.other += negative;
-                    } else if (r == Rarity_Uncommon) {
-                        if (negative) dnsm_set(&uncommonNegative, uncommonCount);
-                        uncommonCount++;
-                    } else {
-                        if (negative) dnsm_set(&rareNegative, rareCount);
-                        rareCount++;
-                    }
-                }
-
-                if (uncommonCount > 0) {
-                    if (shopUncommonNode == RNG_NODE_INVALID) {
-                        shopUncommonNode = rng_node_resolve(inst,
-                            (__private ntype[]){N_Type, N_Source, N_Ante},
-                            (__private int[]){R_Joker_Uncommon, S_Shop, ante}, 3);
-                        shopUncommonState =
-                            inst->rngCache.nodes[shopUncommonNode].rngState;
-                    }
-                    dns_flush_identities(inst, &shopUncommonState, &shopRng,
-                        R_Joker_Uncommon, ante, uncommonCount, &uncommonNegative,
-                        uncommonItemCount, uncommonLockedLow, uncommonLockedHigh,
-                        dietColaIndex, dietColaIndex, true, &c);
-                }
-
-                if (rareCount > 0) {
-                    if (shopRareNode == RNG_NODE_INVALID) {
-                        shopRareNode = rng_node_resolve(inst,
-                            (__private ntype[]){N_Type, N_Source, N_Ante},
-                            (__private int[]){R_Joker_Rare, S_Shop, ante}, 3);
-                        shopRareState = inst->rngCache.nodes[shopRareNode].rngState;
-                    }
-                    dns_flush_identities(inst, &shopRareState, &shopRng,
-                        R_Joker_Rare, ante, rareCount, &rareNegative,
-                        rareItemCount, rareLocked, 0UL,
-                        blueprintIndex, brainstormIndex, false, &c);
-                }
-            }
-            inst->rngCache.nodes[shopRarityNode].rngState = shopRarityState;
-            inst->rngCache.nodes[shopEditionNode].rngState = shopEditionState;
-            if (shopUncommonNode != RNG_NODE_INVALID)
-                inst->rngCache.nodes[shopUncommonNode].rngState =
-                    shopUncommonState;
-            if (shopRareNode != RNG_NODE_INVALID)
-                inst->rngCache.nodes[shopRareNode].rngState = shopRareState;
-        }
-        inst->rng = shopRng;
         for (int p = 0; p < DNS_PACKS; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
+            ISO_TALLY(0, 1);
             if (_pack.type != Buffoon_Pack) continue;
             item drawn[5];
             for (int j = 0; j < _pack.size; j++) {
+#ifdef DNS_ISO_COUNT
+                dns_iso_counted_joker(inst, S_Buffoon, ante, &c, &drawn[j], isoDraws);
+#else
                 dns_joker(inst, S_Buffoon, ante, &c, &drawn[j]);
+#endif
                 if (!inst->params.showman) i_lock(inst, drawn[j]); // temporary reroll, as buffoon_pack does
             }
             for (int j = 0; j < _pack.size; j++) i_unlock(inst, drawn[j]);
         }
     }
 #if DIAG_BALLAST_KB > 0
-    // Always 0: diag_bj was written with the magic above. Keeps the ballast
-    // live across the whole ante loop without perturbing the score.
     long diag_extra = (diag_ballast[diag_bj] == DIAG_BALLAST_MAGIC) ? 0L : 1L;
 #else
     long diag_extra = 0L;
 #endif
-    return (long)c.copy * 1000000000000L + (long)c.uncommon * 1000000000L + (long)c.other * 1000000L
-         + (long)firstTagNeg * 1000L + (long)secondTagNeg + diag_extra;
+    (void)diag_extra;
+    ISO_RETURN
 }

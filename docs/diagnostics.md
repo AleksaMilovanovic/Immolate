@@ -204,3 +204,77 @@ bundle against the old filter; the four transforms would need porting into the s
 filter to be adopted. And the whole RNG core is capped at 19.7% on that old base -- against
 the new one, which is 2.8x faster, the RNG core is a larger share of what remains, so a
 positive result here is worth more than it looks.
+
+---
+
+# DNS factor-isolation suite
+
+30 fixtures that separate every major cost factor in `deep_negative_shops`, built against the
+**current** filter (depth-major staging, `DNS_CHUNK 512`). ~16 min on an RTX 5080.
+
+```bash
+python tests/run.py --profile diag-factors --scale rtx5080
+```
+
+On NVIDIA the build applies `-cl-nv-maxrregcount=128` automatically, so every case is
+register-pinned without passing anything. That matters: unpinned, an earlier run's ratios were
+dominated by a register-allocation lottery worth up to 12%, which is larger than most of the
+effects being measured.
+
+## Read it in this order
+
+**1. `ctl-b / ctl-a` must be 1.000x +/- 0.5%.** A byte-identical pair. If it is not 1.000,
+allocation is not controlled and **no other ratio in the run is readable** -- stop and say so.
+This check is the single most important line in the output; its absence invalidated a previous run.
+
+**2. `sub-tags` must be 0.99-1.00.** It removes 72 of ~52,300 draws (0.14%). A drop beyond ~2%
+means the harness is measuring noise, not the fixtures.
+
+**3. Subtractive family (`sub-*`)** -- ceiling per factor: the most that eliminating it could
+ever save. Compare each against its draw share; a ratio far *below* its draw share prices
+divergence, not work.
+
+| stream | draws/seed | share |
+|---|---:|---:|
+| cardtype | 18,624 | 35.6% |
+| rarity | 13,293 | 25.4% |
+| edition | 13,293 | 25.4% |
+| uncid base / resample | 3,333 / 1,739 | 6.4% / 3.3% |
+| rareid base / resample | 662 / 807 | 1.3% / 1.5% |
+| packsel / packcontents | 216 / 170 | 0.4% / 0.3% |
+| vouchers | 115 | 0.22% |
+| tags | 72 | 0.14% |
+
+`sub-edition` and `sub-rarity` are an internal consistency check: identical draw counts and
+structure, so a gap beyond ~0.02 is classification cost, not draw cost.
+
+**CONFOUND:** `sub-vouchers` is not volume-neutral. Removing vouchers removes early-Overstock
+frame growth, dropping card-type draws from 18,624 to 17,910 -- it deletes 3.8% of shop work too.
+Subtract that before reading it.
+
+**4. Isolating family (`iso-*`)** -- standalone cost, not a ceiling. **Sum the six, then subtract
+five copies of the voucher spine** (~113 draws each, retained in all six because Overstock
+sightings drive every other stream's volume). The gap between that sum and 1.000 is
+**interaction cost** -- divergence, occupancy, cache pressure -- which no single-stream
+optimization can reach. Predicted 20-40%.
+
+**5. Divergence probes.** `div-resample-max / div-resample-mean` **is the divergence tax,
+measured.** Draws rise only 1.22x between them (3,358x3 + 671x6 resamples vs the geometric mean
+schedule), so anything materially above 1.22x is divergence rather than work. Where the shipped
+filter sits between the two says how much headroom the depth-major rewrite left.
+
+**6. Scheduling family (`sched-*`)** -- all bit-exact, zero draw-count change, so any movement is
+pure scheduling. Two are inverted from their names because the shipped code already did the
+literal thing asked for: `sched-interleaved-re` measures the **split** (a ratio of x implies 1/x
+for what we ship), and `sched-packs-hoisted` hoists across the whole ante range because shops
+already precede packs within an ante.
+
+**CONFOUND:** `sched-interleaved-re` needs ~36 extra live registers at chunk 512, close to the
+128-register cap. Check `--verbose_build` for spills before believing a slowdown there.
+
+## Superseded fixtures
+
+The 14 `diag_dns_abl_*` / `diag_dns_{maxframes,nolocks,uniform_frames,prefix*}` files copy the
+PRE-REWRITE filter. They are marked SUPERSEDED and unwired from every profile; running them would
+measure the old implementation and return ratios that look valid. `dns_sub_*` replaces them.
+`diag_dns_baseline` is deliberately kept as the pre-rewrite regression control for the 2.076x.

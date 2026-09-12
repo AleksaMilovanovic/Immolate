@@ -1,3 +1,69 @@
+// =========================================================================
+// DIAGNOSTIC FIXTURE - SCHEDULING ONLY. Scores are CORRECT and must be
+// bit-identical to deep_negative_shops.cl. Part of the DNS benchmark pack.
+//
+// NAMING NOTE. The brief asked to run "all shops for the ante, then all
+// packs". The shipped filter already does that WITHIN an ante. The only
+// remaining hoist is across the whole ante range, which is what this does:
+// pass 1 runs vouchers + tags + shops for antes 1..38, pass 2 runs the packs
+// for antes 3..38. Vouchers and tags stay in pass 1 and are not re-drawn.
+//
+// PER-NODE ORDER ARGUMENT, in three parts.
+//   (a) Node disjointness. Shops name S_Shop nodes plus (R_Card_Type, ante);
+//       packs name (R_Shop_Pack[, ante]) and S_Buffoon joker nodes. No node
+//       is touched by both, so moving a pack block past a shop block cannot
+//       reorder draws within any node.
+//   (b) Order preserved within each stream. Packs still run in increasing
+//       ante order and shops still run in increasing ante order. This matters
+//       for the legacy versions where next_pack is NOT ante-keyed and all
+//       packs share one global node: that node still sees antes 3,4,...,38 in
+//       order. (It is also why the base filter's header restricts node
+//       discarding to ante-keyed pack versions - that restriction is about
+//       cache eviction, not about this reordering.)
+//   (c) No carried state couples them. The only mutable non-RNG state the
+//       pack path reads is the item-lock table. Shops never mutate it.
+//       Vouchers do - activate_voucher does i_lock(voucher) and
+//       i_unlock(voucher+1) - but both stay inside the voucher block of the
+//       item enum (the guard is voucherIndex % 2 == 0, so voucher+1 is that
+//       voucher's own upgrade), and packs only test JOKER locks via
+//       randchoice_common. So the joker lock table seen by ante a's packs is
+//       the same table in both arrangements, even though pass 2 now runs with
+//       all 38 antes' vouchers already activated.
+//   Cache note: with DNS_ANTE_LOCAL_CACHE the pass-2 loop repeats the
+//   per-ante discard, and every node it creates is ante-keyed and untouched
+//   by pass 1, so each is resolved fresh from the seed hash exactly once.
+//   With the legacy cumulative cache there is no discard and the total set of
+//   live nodes is unchanged, so CACHE_SIZE 2048 still covers it.
+//
+// PREDICTION: 1.00x-1.15x. Packs are ~1.5% of draws but they are the most
+// divergent code in the filter (a data-dependent pack type, a data-dependent
+// pack size, and randchoice_common's ordinal-major resample while-loop - the
+// exact form that cost 2.076x in the shop path). Hoisting them concentrates
+// that divergence into one pass instead of stalling every ante's shop work.
+// A ratio above ~1.05x says pack divergence is polluting the shop loop's
+// occupancy and the packs deserve the same depth-major rewrite the shop
+// identity pools already got. A flat 1.00x says the shop loop dominates so
+// completely that pack scheduling is invisible, and the packs can be left
+// alone.
+// =========================================================================
+// EXACTNESS MODEL (shared by every dns_sched_* fixture).
+// An RNG node is an independent stream: its state is seeded by
+// pseudohash(node name + seed) in rng_node_resolve and is advanced only by
+// draws naming that same node. Two draws can therefore only influence each
+// other when they name the SAME node. Reordering draws ACROSS nodes is free;
+// only the order WITHIN a node is load-bearing.
+//
+// Secondary state that could couple nodes, and why it does not:
+//   * inst->rng - every read of it in lib/ (random, randint, randchoice,
+//     randweightedchoice, random_bound, next_boss, shuffle_deck) is preceded
+//     by a write to it in the same call, so `inst->rng = shopRng` is dead for
+//     RNG purposes and carries nothing across a reordering.
+//   * the rngCache - node states are keyed by name, not by insertion order,
+//     and DNS_ANTE_LOCAL_CACHE only discards slots for antes that are
+//     finished. Every reachable node here is ante-keyed.
+//   * item locks - the shop path never mutates them; the pack path locks and
+//     unlocks its own draws within one pack.
+// =========================================================================
 // Deep shop scan, antes 3-38: negative jokers, Diet Colas and Negative Tags.
 // Meant to run over a seed-supplier pool (--from); at ~11,000 shop cards per
 // seed it is far too slow for a raw walk.
@@ -534,6 +600,14 @@ long filter(instance* inst) {
                 inst->rngCache.nodes[shopRareNode].rngState = shopRareState;
         }
         inst->rng = shopRng;
+    }
+    // SCHEDULING PROBE: the per-ante pack loop is hoisted out of the shop loop
+    // and run as its own pass over antes DNS_FIRST_ANTE..DNS_LAST_ANTE.
+    for (int ante = DNS_FIRST_ANTE; ante <= DNS_LAST_ANTE; ante++) {
+#if DNS_ANTE_LOCAL_CACHE
+        inst->rngCache.nextFreeNode = 0;
+        inst->rngCache.lastNode = -1;
+#endif
         for (int p = 0; p < DNS_PACKS; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
             if (_pack.type != Buffoon_Pack) continue;

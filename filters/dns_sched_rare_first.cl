@@ -1,12 +1,44 @@
-// SUPERSEDED - copies the PRE-REWRITE deep_negative_shops (32-slot ordinal-major
-// staging, 128-bit mask pair). Not comparable to the current filter. Unwired from
-// every profile; the dns_sub_* family replaces it on the current base.
-// ===========================================================================
-// DIAGNOSTIC ABLATION - PRODUCES DELIBERATELY WRONG SCORES.
-// Part of the DNS benchmark pack. Never wire this into correctness goldens.
-// Ablates the shop RARE IDENTITY stream (base draw + its resample loop).
-// Time drop = rare-identity share INCLUDING its divergence tax.
-// ===========================================================================
+// =========================================================================
+// DIAGNOSTIC FIXTURE - SCHEDULING ONLY. Scores are CORRECT and must be
+// bit-identical to deep_negative_shops.cl. Part of the DNS benchmark pack.
+//
+// WHAT MOVES: inside each DNS_CHUNK staging chunk the RARE identity pool is
+// flushed before the UNCOMMON pool (shipped order is uncommon, then rare).
+// Nothing else changes: same chunking, same ordinals, same draw count.
+//
+// PER-NODE ORDER ARGUMENT: the two flushes touch disjoint node sets - the
+// uncommon flush names (R_Joker_Uncommon, S_Shop, ante) and its
+// (.., N_Resample, d) children, the rare flush names (R_Joker_Rare, S_Shop,
+// ante) and its children - and each pool still consumes its own nodes in
+// unchanged ordinal order, so no node sees a different sequence.
+//
+// PREDICTION: ~1.00x. Shop rarity is 25% uncommon / 5% rare, so the rare
+// flush is ~1/5 the length of the uncommon one at any DNS_CHUNK (at the
+// current 512 that is ~26 rare ordinals against ~128 uncommon). Flushing the
+// short pool first only changes which pool holds the warp at the chunk
+// boundary. A ratio measurably off 1.00 would
+// mean the two flushes are not independent at the warp level - i.e. the
+// shorter, more divergent rare flush is cheaper to run while the uncommon
+// state is still live in registers.
+// =========================================================================
+// EXACTNESS MODEL (shared by every dns_sched_* fixture).
+// An RNG node is an independent stream: its state is seeded by
+// pseudohash(node name + seed) in rng_node_resolve and is advanced only by
+// draws naming that same node. Two draws can therefore only influence each
+// other when they name the SAME node. Reordering draws ACROSS nodes is free;
+// only the order WITHIN a node is load-bearing.
+//
+// Secondary state that could couple nodes, and why it does not:
+//   * inst->rng - every read of it in lib/ (random, randint, randchoice,
+//     randweightedchoice, random_bound, next_boss, shuffle_deck) is preceded
+//     by a write to it in the same call, so `inst->rng = shopRng` is dead for
+//     RNG purposes and carries nothing across a reordering.
+//   * the rngCache - node states are keyed by name, not by insertion order,
+//     and DNS_ANTE_LOCAL_CACHE only discards slots for antes that are
+//     finished. Every reachable node here is ante-keyed.
+//   * item locks - the shop path never mutates them; the pack path locks and
+//     unlocks its own draws within one pack.
+// =========================================================================
 // Deep shop scan, antes 3-38: negative jokers, Diet Colas and Negative Tags.
 // Meant to run over a seed-supplier pool (--from); at ~11,000 shop cards per
 // seed it is far too slow for a raw walk.
@@ -69,8 +101,18 @@
 
 // Across 20,480 stratified seeds the per-ante peak was 80 nodes (p99 51).
 // Keep legacy global-pack versions at the original cumulative capacity.
+// Measured over 20,480 stratified seeds: per-ante peak p50 34, p90 41, p99 52,
+// p99.9 62, max 83. The upper tail is exponential (ratio 0.818/node), so
+// P(peak > 256) ~ 1e-20 and P(peak > 128) ~ 2e-9. 256 keeps overflow -- which
+// silently corrupts that seed's score -- unreachable.
+// DNS_CACHE_SIZE_OVERRIDE exists only for the footprint diagnostics in
+// tests/diagnostics.json; leave it undefined for real runs.
 #if DNS_ANTE_LOCAL_CACHE
-    #define CACHE_SIZE 256
+    #ifdef DNS_CACHE_SIZE_OVERRIDE
+        #define CACHE_SIZE DNS_CACHE_SIZE_OVERRIDE
+    #else
+        #define CACHE_SIZE 256
+    #endif
 #else
     #define CACHE_SIZE 2048
 #endif
@@ -203,6 +245,142 @@ inline int dns_shop_randindex_scalar(
     return index;
 }
 
+// ---------------------------------------------------------------------------
+// CANDIDATE (exact). Bit-identical scores to deep_negative_shops.cl.
+//
+// 1. The staging chunk grows from 32 to DNS_CHUNK shop joker slots. At 32
+//    slots an ante's uncommon pool gets only ~8 ordinals per flush and the
+//    rare pool ~1.6, so the per-flush counts are dominated by their own
+//    spread; at 128 they are ~32 and ~6.4.
+// 2. Each identity pool's resample chain is drawn DEPTH-MAJOR:
+//
+//      before:  for ordinal: draw base; while locked: draw resample_1, _2, ...
+//      after :  for ordinal: draw base                    (base node)
+//               for depth:   for each still-locked ordinal, in ordinal order:
+//                                draw resample_<depth>
+//
+// Exactness: every RNG node is an independent stream (its state is a
+// pseudohash of its own name plus the seed), so only the order of draws
+// WITHIN one node can matter. The base node is still consumed in ordinal
+// order; node resample_<d> is still consumed by exactly the ordinals locked
+// at every depth < d, in increasing ordinal order - which is also what the
+// ordinal-major loop produces. Same argument the existing 32-slot
+// rarity/edition staging already relies on.
+//
+// Why it should be faster on a 32-lane warp: the ordinal-major form costs
+// sum_over_ordinals max_over_lanes(1 + resamples), and resamples are
+// geometric (p_locked = 22/64 uncommon, 11/20 rare) so the max over 32 lanes
+// is several times the mean. Depth-major costs
+// sum_over_depths max_over_lanes(count), and those counts are binomial, so
+// they concentrate. None of this is visible on a CPU OpenCL device.
+// ---------------------------------------------------------------------------
+#ifndef DNS_CHUNK
+#define DNS_CHUNK 512   // shop joker slots staged before identities are drawn
+// Measured on an RTX 5080 (344,064 seeds, register-capped build), against 128:
+//   chunk  64 = 1.158x (worse)   256 = 0.903x   512 = 0.859x
+// The curve had not saturated at 128. Larger is better because a bigger chunk
+// gives each identity pool more ordinals per depth pass, so the depth-major
+// resample chain's trip count concentrates instead of diverging across lanes.
+// Not raised further yet: the staging masks are DNS_CHUNK bits wide, so at 1024
+// the ~5 live masks need ~160 registers and would spill past the 128-register
+// cap. The largest ante has ~660 joker cards, so 1024 would be one chunk per
+// ante and is the most chunking can ever do -- see diag_dns_chunk1024.
+#endif
+#if DNS_CHUNK < 1
+#error "DNS_CHUNK must be positive"
+#endif
+// Round up: a chunk of 32 still needs one word, and the mask's capacity is then
+// >= DNS_CHUNK, which is all the no-overflow argument requires.
+#define DNS_MASK_WORDS ((DNS_CHUNK + 63) / 64)
+
+// A DNS_CHUNK-wide bitmask. Capacity equals the chunk size by construction, so
+// an identity buffer can never overflow its chunk whatever DNS_CHUNK is set to.
+// (This was a hard-coded {lo, hi} pair, which silently capped the chunk at 128.)
+typedef struct DnsMask { ulong w[DNS_MASK_WORDS]; } dns_mask;
+inline void dnsm_clear(dns_mask* m) {
+    for (int i = 0; i < DNS_MASK_WORDS; i++) m->w[i] = 0UL;
+}
+inline void dnsm_set(dns_mask* m, int o) { m->w[o >> 6] |= 1UL << (o & 63); }
+inline void dnsm_clr(dns_mask* m, int o) { m->w[o >> 6] &= ~(1UL << (o & 63)); }
+inline bool dnsm_get(const dns_mask* m, int o) {
+    return ((m->w[o >> 6] >> (o & 63)) & 1UL) != 0UL;
+}
+inline bool dnsm_any(const dns_mask* m) {
+    ulong any = 0UL;
+    for (int i = 0; i < DNS_MASK_WORDS; i++) any |= m->w[i];
+    return any != 0UL;
+}
+inline int dnsm_pop(const dns_mask* m) {
+    int n = 0;
+    for (int i = 0; i < DNS_MASK_WORDS; i++) n += popcount(m->w[i]);
+    return n;
+}
+inline int dnsm_pop_and(const dns_mask* a, const dns_mask* b) {
+    int n = 0;
+    for (int i = 0; i < DNS_MASK_WORDS; i++) n += popcount(a->w[i] & b->w[i]);
+    return n;
+}
+inline int dnsm_pop_andnot(const dns_mask* a, const dns_mask* b) {
+    int n = 0;
+    for (int i = 0; i < DNS_MASK_WORDS; i++) n += popcount(a->w[i] & ~b->w[i]);
+    return n;
+}
+
+// Draw `n` identities from one shop rarity pool, depth-major.
+// `neg` carries each ordinal's Negative-edition bit; `specialA/B` are the
+// indices that score specially (Diet Cola for uncommons, Blueprint and
+// Brainstorm for rares).
+inline void dns_flush_identities(
+    instance* inst, double* state, lrandom* scratch,
+    rtype rngType, int ante, int n, const dns_mask* neg, int itemCount,
+    ulong lockedLow, ulong lockedHigh,
+    int specialA, int specialB, bool uncommonPool, dns_counts* c
+) {
+    dns_mask locked, special;
+    dnsm_clear(&locked); dnsm_clear(&special);
+    for (int o = 0; o < n; o++) {
+        *scratch = randomseed(dns_rng_node_advance_scalar(inst, state));
+        int index = (int)l_randint(scratch, 1, itemCount);
+        if (index == specialA || index == specialB) dnsm_set(&special, o);
+        if (dns_index_locked(index, lockedLow, lockedHigh)) dnsm_set(&locked, o);
+    }
+    if (!inst->params.showman) {
+        for (int depth = 1; dnsm_any(&locked); depth++) {
+            rng_node_id nd = rng_node_resolve(inst,
+                (__private ntype[]){N_Type, N_Source, N_Ante, N_Resample},
+                (__private int[]){rngType, S_Shop, ante, depth}, 4);
+            double st = inst->rngCache.nodes[nd].rngState;
+            dns_mask next; dnsm_clear(&next);
+            // set bits in increasing ordinal order: low word first
+            for (int word = 0; word < DNS_MASK_WORDS; word++) {
+                ulong m = locked.w[word];
+                int off = word * 64;
+                while (m != 0UL) {
+                    ulong low = m & (~m + 1UL);
+                    int o = off + (int)(63UL - clz(low));
+                    m ^= low;
+                    *scratch = randomseed(dns_rng_node_advance_scalar(inst, &st));
+                    int index = (int)l_randint(scratch, 1, itemCount);
+                    if (index == specialA || index == specialB) dnsm_set(&special, o);
+                    else dnsm_clr(&special, o);
+                    if (dns_index_locked(index, lockedLow, lockedHigh)) dnsm_set(&next, o);
+                }
+            }
+            inst->rngCache.nodes[nd].rngState = st;
+            locked = next;
+        }
+    }
+    if (uncommonPool) {
+        // Diet Cola scores as `other` whatever its edition; any other uncommon
+        // scores only when Negative.
+        c->other    += dnsm_pop(&special);
+        c->uncommon += dnsm_pop_andnot(neg, &special);
+    } else {
+        c->copy  += dnsm_pop_and(neg, &special);
+        c->other += dnsm_pop_andnot(neg, &special);
+    }
+}
+
 // Classify one joker after its rarity draw: identity where needed, then edition.
 inline void dns_joker_from_rarity(instance* inst, rsrc src, int ante, rarity r, dns_counts* c, item* drawn) {
     item joker;
@@ -222,7 +400,33 @@ inline void dns_joker(instance* inst, rsrc src, int ante, dns_counts* c, item* d
     dns_joker_from_rarity(inst, src, ante, next_joker_rarity(inst, src, ante), c, drawn);
 }
 
+// DIAG_BALLAST_KB adds N KB of otherwise-unused private memory to the kernel
+// frame, to measure how per-work-item footprint alone affects throughput. It
+// changes nothing else: the same draws, the same ALU, the same cache traffic.
+// The array is volatile and is written and read at two seed-dependent indices
+// the compiler cannot bound, so it cannot be scalarised away; the value read is
+// always the value written, so the score stays bit-identical to a
+// DIAG_BALLAST_KB=0 build. Diagnostic only - see tests/diagnostics.json.
+//
+// NOTE: on an RTX 5080 this sweep was NOT readable as a footprint measurement
+// until -cl-nv-maxrregcount pinned the register count. Unpinned, any source
+// perturbation moves the kernel between 12/14/15/16 resident warps and swamps
+// the footprint effect: 1 KB and 4 KB of ballast measured identically (0.933x),
+// as did 2 KB and 8 KB (0.878x). Always pin registers when running this.
+#ifndef DIAG_BALLAST_KB
+#define DIAG_BALLAST_KB 0
+#endif
+#define DIAG_BALLAST_WORDS (DIAG_BALLAST_KB * 128)
+#define DIAG_BALLAST_MAGIC 0x5A5A5A5A5A5A5A5AUL
+
 long filter(instance* inst) {
+#if DIAG_BALLAST_KB > 0
+    volatile ulong diag_ballast[DIAG_BALLAST_WORDS];
+    uint diag_bi = (uint)(inst->seed.data[0] * 31UL + inst->seed.data[1]) % (uint)DIAG_BALLAST_WORDS;
+    uint diag_bj = (uint)(inst->seed.data[2] * 17UL + inst->seed.data[3] + 1UL) % (uint)DIAG_BALLAST_WORDS;
+    diag_ballast[diag_bi] = DIAG_BALLAST_MAGIC;
+    diag_ballast[diag_bj] = DIAG_BALLAST_MAGIC;
+#endif
     for (int i = 0; i < (int)(sizeof(DNS_UPGRADE_VOUCHERS) / sizeof(item)); i++) i_lock(inst, DNS_UPGRADE_VOUCHERS[i]);
     DNS_APPLY_LOCKS(DNS_LOCKED_COMMONS, i_lock)
     DNS_APPLY_LOCKS(DNS_LOCKED_UNCOMMONS, i_lock)
@@ -309,11 +513,13 @@ long filter(instance* inst) {
             rng_node_id shopRareNode = RNG_NODE_INVALID;
             double shopUncommonState = 0, shopRareState = 0;
 
-            // Stage rarity and edition in warp-sized chunks, then consume each
-            // identity stream densely while preserving its ordinal draw order.
-            for (int base = 0; base < jokerCards; base += 32) {
-                int chunkSize = min(32, jokerCards - base);
-                uint uncommonNegative = 0u, rareNegative = 0u;
+            // Stage rarity and edition in DNS_CHUNK-slot chunks, then draw each
+            // identity pool depth-major. Every lane flushes at the same chunk
+            // boundary, so the flushes stay warp-aligned.
+            for (int base = 0; base < jokerCards; base += DNS_CHUNK) {
+                int chunkSize = min(DNS_CHUNK, jokerCards - base);
+                dns_mask uncommonNegative, rareNegative;
+                dnsm_clear(&uncommonNegative); dnsm_clear(&rareNegative);
                 int uncommonCount = 0, rareCount = 0;
 
                 for (int slot = 0; slot < chunkSize; slot++) {
@@ -325,46 +531,39 @@ long filter(instance* inst) {
                     if (r == Rarity_Common) {
                         c.other += negative;
                     } else if (r == Rarity_Uncommon) {
-                        uncommonNegative |= (uint)negative << uncommonCount;
+                        if (negative) dnsm_set(&uncommonNegative, uncommonCount);
                         uncommonCount++;
                     } else {
-                        rareNegative |= (uint)negative << rareCount;
+                        if (negative) dnsm_set(&rareNegative, rareCount);
                         rareCount++;
                     }
                 }
 
-                if (uncommonCount > 0 && shopUncommonNode == RNG_NODE_INVALID) {
-                    shopUncommonNode = rng_node_resolve(inst,
-                        (__private ntype[]){N_Type, N_Source, N_Ante},
-                        (__private int[]){R_Joker_Uncommon, S_Shop, ante}, 3);
-                    shopUncommonState =
-                        inst->rngCache.nodes[shopUncommonNode].rngState;
-                }
-                for (int ordinal = 0; ordinal < uncommonCount; ordinal++) {
-                    int jokerIndex = dns_shop_randindex_scalar(inst,
-                        &shopUncommonState, &shopRng,
-                        R_Joker_Uncommon, ante, uncommonItemCount,
-                        uncommonLockedLow, uncommonLockedHigh);
-                    if (jokerIndex == dietColaIndex) {
-                        c.other++;
-                    } else if ((uncommonNegative >> ordinal) & 1u) {
-                        c.uncommon++;
+                if (rareCount > 0) {
+                    if (shopRareNode == RNG_NODE_INVALID) {
+                        shopRareNode = rng_node_resolve(inst,
+                            (__private ntype[]){N_Type, N_Source, N_Ante},
+                            (__private int[]){R_Joker_Rare, S_Shop, ante}, 3);
+                        shopRareState = inst->rngCache.nodes[shopRareNode].rngState;
                     }
+                    dns_flush_identities(inst, &shopRareState, &shopRng,
+                        R_Joker_Rare, ante, rareCount, &rareNegative,
+                        rareItemCount, rareLocked, 0UL,
+                        blueprintIndex, brainstormIndex, false, &c);
                 }
 
-                if (rareCount > 0 && shopRareNode == RNG_NODE_INVALID) {
-                    shopRareNode = rng_node_resolve(inst,
-                        (__private ntype[]){N_Type, N_Source, N_Ante},
-                        (__private int[]){R_Joker_Rare, S_Shop, ante}, 3);
-                    shopRareState = inst->rngCache.nodes[shopRareNode].rngState;
-                }
-                for (int ordinal = 0; ordinal < rareCount; ordinal++) {
-                    int jokerIndex = -1; // ABLATED rare identity stream
-                    if ((rareNegative >> ordinal) & 1u) {
-                        if (jokerIndex == brainstormIndex ||
-                            jokerIndex == blueprintIndex) c.copy++;
-                        else c.other++;
+                if (uncommonCount > 0) {
+                    if (shopUncommonNode == RNG_NODE_INVALID) {
+                        shopUncommonNode = rng_node_resolve(inst,
+                            (__private ntype[]){N_Type, N_Source, N_Ante},
+                            (__private int[]){R_Joker_Uncommon, S_Shop, ante}, 3);
+                        shopUncommonState =
+                            inst->rngCache.nodes[shopUncommonNode].rngState;
                     }
+                    dns_flush_identities(inst, &shopUncommonState, &shopRng,
+                        R_Joker_Uncommon, ante, uncommonCount, &uncommonNegative,
+                        uncommonItemCount, uncommonLockedLow, uncommonLockedHigh,
+                        dietColaIndex, dietColaIndex, true, &c);
                 }
             }
             inst->rngCache.nodes[shopRarityNode].rngState = shopRarityState;
@@ -387,6 +586,13 @@ long filter(instance* inst) {
             for (int j = 0; j < _pack.size; j++) i_unlock(inst, drawn[j]);
         }
     }
+#if DIAG_BALLAST_KB > 0
+    // Always 0: diag_bj was written with the magic above. Keeps the ballast
+    // live across the whole ante loop without perturbing the score.
+    long diag_extra = (diag_ballast[diag_bj] == DIAG_BALLAST_MAGIC) ? 0L : 1L;
+#else
+    long diag_extra = 0L;
+#endif
     return (long)c.copy * 1000000000000L + (long)c.uncommon * 1000000000L + (long)c.other * 1000000L
-         + (long)firstTagNeg * 1000L + (long)secondTagNeg;
+         + (long)firstTagNeg * 1000L + (long)secondTagNeg + diag_extra;
 }

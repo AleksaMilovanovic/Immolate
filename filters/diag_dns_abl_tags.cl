@@ -1,3 +1,6 @@
+// SUPERSEDED - copies the PRE-REWRITE deep_negative_shops (32-slot ordinal-major
+// staging, 128-bit mask pair). Not comparable to the current filter. Unwired from
+// every profile; the dns_sub_* family replaces it on the current base.
 // ===========================================================================
 // DIAGNOSTIC ABLATION - PRODUCES DELIBERATELY WRONG SCORES.
 // Part of the DNS benchmark pack. Never wire this into correctness goldens.
