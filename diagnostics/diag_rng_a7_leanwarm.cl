@@ -9,4 +9,4 @@
 // Diagnostic fixture for the fp64 RNG-core cost study. Never add this file to
 // tests/golden/ or to any profile that compares against a golden.
 #define DIAG_VARIANT_LEANWARM 1
-#include "filters/diag_rng_dns_body.cl"
+#include "diagnostics/diag_rng_dns_body.cl"

@@ -20,6 +20,15 @@ test-results/20260910T120000Z-bf6bf42/
 
 The command prints the exact path when it finishes.
 
+## Where kernels live
+
+`filters/` holds **search filters**: kernels that take seeds in and produce a smaller set of seeds
+out. `diagnostics/` holds **timing and cost-attribution fixtures**, most of which deliberately
+return meaningless scores and exist only to be measured.
+
+`-f <name>` takes a bare name and resolves it in either directory, so nothing about how you invoke
+a filter changes. An unknown name reports both paths it tried.
+
 ## Diagnostic profiles
 
 `tests/diagnostics.json` holds 43 ablation fixtures used to work out what the kernel is actually bound

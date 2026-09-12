@@ -8,4 +8,4 @@
 // through filters/dns_sub_core.cl, an instrumented copy of
 // deep_negative_shops.cl that must be re-synced BY HAND when that file changes.
 #define DNS_SUB_CARDTYPE 1
-#include "filters/dns_sub_core.cl"
+#include "diagnostics/dns_sub_core.cl"

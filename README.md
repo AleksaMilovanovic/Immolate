@@ -93,6 +93,15 @@ Run:
 ./build/Immolate
 ```
 
+## Repository layout
+
+- `filters/` — search filters: seeds in, a smaller set of seeds out.
+- `diagnostics/` — timing and cost-attribution fixtures. Most deliberately return meaningless
+  scores; they exist to be measured, not to search. See [docs/diagnostics.md](docs/diagnostics.md).
+- `lib/` — the shared kernel: RNG, hashing, item tables, instance state.
+
+`-f <name>` resolves a bare name in either `filters/` or `diagnostics/`.
+
 ## Correctness and performance tests
 
 Run the complete regression and benchmark gate from the repository root:

@@ -9,4 +9,4 @@
 // Run:  python3 tests/run.py --profile benchmark --scale rtx5080 \
 //         --cases tests/diag_rng_benchmark.json
 #define DIAG_VARIANT_NOSEEDFP 1
-#include "filters/diag_rng_dns_body.cl"
+#include "diagnostics/diag_rng_dns_body.cl"

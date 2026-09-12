@@ -20,6 +20,29 @@ static double wall_seconds(void) {
 // Launch a 1-D kernel over numGroups work-groups. If the driver rejects the
 // work-group size for this kernel, halve it once and retry; the new geometry is
 // written back so later launches use it too.
+// Where a kernel by name lives. `filters/` holds real search filters -- things
+// that take seeds in and produce a smaller set of seeds out. `diagnostics/`
+// holds fixtures that exist for timing and cost attribution, most of which
+// deliberately return meaningless scores. Both the kernel #include and the
+// compiled-binary cache key need the right directory, so probe for the file:
+// next to the executable first, then relative to the working directory, which
+// is how search.cl is already located.
+static const char* filter_dir(const char* executable_dir, const char* filter) {
+    static const char* const dirs[] = { "filters", "diagnostics" };
+    char probe[MAX_PATH + 288];
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+        FILE* f;
+        snprintf(probe, sizeof probe, "%s%s%s%s%s.cl",
+                 executable_dir, PATH_SEPARATOR, dirs[i], PATH_SEPARATOR, filter);
+        f = fopen(probe, "r");
+        if (f) { fclose(f); return dirs[i]; }
+        snprintf(probe, sizeof probe, "%s%s%s.cl", dirs[i], PATH_SEPARATOR, filter);
+        f = fopen(probe, "r");
+        if (f) { fclose(f); return dirs[i]; }
+    }
+    return NULL;
+}
+
 static cl_int enqueue_1d(cl_command_queue queue, cl_kernel kernel, size_t* globalSize, size_t* localSize, unsigned int numGroups) {
     cl_int err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, globalSize, localSize, 0, NULL, NULL);
     if (err == CL_INVALID_WORK_GROUP_SIZE && *localSize > 1) {
@@ -537,7 +560,15 @@ int main(int argc, char **argv) {
     ssKernelCode = (char*)malloc(MAX_CODE_SIZE);
     ssKernelBuf = (char*)malloc(MAX_CODE_SIZE);
     // Set include information
-    strcpy_s(ssKernelCode, MAX_CODE_SIZE, "#include \"filters/");
+    const char* filterDir = filter_dir(executable_dir, filter);
+    if (!filterDir) {
+        fprintf_s(stderr, "Filter \"%s\" not found as filters%s%s.cl or diagnostics%s%s.cl.\n",
+                  filter, PATH_SEPARATOR, filter, PATH_SEPARATOR, filter);
+        exit(EXIT_FAILURE);
+    }
+    strcpy_s(ssKernelCode, MAX_CODE_SIZE, "#include \"");
+    strcat_s(ssKernelCode, MAX_CODE_SIZE, filterDir);
+    strcat_s(ssKernelCode, MAX_CODE_SIZE, "/");
     strcat_s(ssKernelCode, MAX_CODE_SIZE, filter);
     strcat_s(ssKernelCode, MAX_CODE_SIZE, ".cl\"\n\n");
     size_t bytes_read = fread( ssKernelBuf, 1, MAX_CODE_SIZE - 1, fp);
@@ -639,7 +670,7 @@ int main(int argc, char **argv) {
         h = fnv1a_buf(h, ssKernelCode, ssKernelSize); // includes the filter #include line
         int ok = 1;
         char src_path[MAX_PATH + 64];
-        snprintf(src_path, sizeof src_path, "%s%sfilters%s%s.cl", executable_dir, PATH_SEPARATOR, PATH_SEPARATOR, filter);
+        snprintf(src_path, sizeof src_path, "%s%s%s%s%s.cl", executable_dir, PATH_SEPARATOR, filterDir, PATH_SEPARATOR, filter);
         h = fnv1a_file(h, src_path, &ok);
         static const char* libFiles[] = {"immolate.cl", "util.cl", "seed.cl", "items.cl", "debug.cl", "cache.cl", "instance.cl", "functions.cl"};
         for (size_t i = 0; i < sizeof(libFiles) / sizeof(libFiles[0]); i++) {
@@ -670,7 +701,7 @@ int main(int argc, char **argv) {
                 if (ssKernelProgram != NULL) clReleaseProgram(ssKernelProgram);
                 ssKernelProgram = NULL;
             } else {
-                printf_s("Loaded compiled kernel from cache (sources hashed under %s%slib and %s%sfilters).\n", executable_dir, PATH_SEPARATOR, executable_dir, PATH_SEPARATOR);
+                printf_s("Loaded compiled kernel from cache (sources hashed under %s%slib and %s%s%s).\n", executable_dir, PATH_SEPARATOR, executable_dir, PATH_SEPARATOR, filterDir);
                 loadedFromCache = 1;
             }
             free(bin);
