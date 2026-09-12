@@ -1,63 +1,29 @@
 {
   "schema": 1,
   "_comment": [
-    "DNS factor-isolation suite. Every dns_sub_*/dns_iso_*/dns_div_* fixture PRODUCES",
-    "DELIBERATELY WRONG SCORES; dns_sched_* and the chunk fixtures are bit-exact.",
-    "No case here references tests/golden/ and none may ever be added to one.",
+    "Timing fixtures for deep_negative_shops. Every one is a thin #include wrapper",
+    "around the live filter, so none can drift out of sync with it.",
     "ctl-a/ctl-b are a byte-identical pair and MUST read 1.000x +/- 0.5%. If they do",
-    "not, register allocation is not controlled and no other ratio in the run is",
-    "readable -- that failure mode invalidated an entire previous run.",
-    "On NVIDIA the build applies -cl-nv-maxrregcount=128 automatically, so every case",
-    "is register-pinned without passing args.",
+    "not, register allocation is not controlled and no other ratio is readable.",
+    "On NVIDIA the build pins -cl-nv-maxrregcount=128 automatically.",
     "Counts are 8x the rtx5080 launch width (43008 lanes)."
   ],
   "profiles": {
     "diag-ctl": [
       "diag_ctl"
     ],
-    "diag-sub": [
+    "diag-packs": [
       "diag_ctl",
-      "diag_sub"
-    ],
-    "diag-iso": [
-      "diag_ctl",
-      "diag_iso"
-    ],
-    "diag-sched": [
-      "diag_ctl",
-      "diag_sched"
-    ],
-    "diag-div": [
-      "diag_ctl",
-      "diag_div"
+      "diag_packs"
     ],
     "diag-chunk": [
       "diag_ctl",
       "diag_chunk"
     ],
-    "diag-rng": [
-      "diag_rng"
-    ],
-    "diag-factors": [
-      "diag_ctl",
-      "diag_sub",
-      "diag_iso",
-      "diag_sched",
-      "diag_div"
-    ],
     "diag-all": [
-      "diag_chunk",
       "diag_ctl",
-      "diag_div",
-      "diag_iso",
       "diag_packs",
-      "diag_rng",
-      "diag_sched",
-      "diag_sub"
-    ],
-    "diag-packs": [
-      "diag_ctl",
-      "diag_packs"
+      "diag_chunk"
     ]
   },
   "scales": {
@@ -71,733 +37,6 @@
     }
   },
   "cases": [
-    {
-      "id": "diag-a0-base",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_a0_base",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807
-    },
-    {
-      "id": "diag-a1-nowarmup",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_a1_nowarmup",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-a0-base"
-    },
-    {
-      "id": "diag-a2-noround",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_a2_noround",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-a0-base"
-    },
-    {
-      "id": "diag-a3-intstate",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_a3_intstate",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-a0-base"
-    },
-    {
-      "id": "diag-a4-noseedfp",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_a4_noseedfp",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-a0-base"
-    },
-    {
-      "id": "diag-a5-norngcore",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_a5_norngcore",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-a0-base"
-    },
-    {
-      "id": "diag-a6-exact",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_a6_exact",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-a0-base"
-    },
-    {
-      "id": "diag-a7-leanwarm",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_a7_leanwarm",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-a0-base"
-    },
-    {
-      "id": "diag-chain-k1",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_chain_k1",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 4472832
-      },
-      "cutoff": 9223372036854775807
-    },
-    {
-      "id": "diag-chain-k2",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_chain_k2",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 4472832
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-chain-k1"
-    },
-    {
-      "id": "diag-chain-k4",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_chain_k4",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 4472832
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-chain-k1"
-    },
-    {
-      "id": "diag-chain-k8",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_chain_k8",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 4472832
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-chain-k1"
-    },
-    {
-      "id": "diag-ph-base",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_ph_base",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 2279424
-      },
-      "cutoff": 9223372036854775807
-    },
-    {
-      "id": "diag-ph-micro",
-      "kind": "benchmark",
-      "tags": [
-        "diag_rng"
-      ],
-      "filter": "diag_rng_ph_micro",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 2279424
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "diag-ph-base"
-    },
-    {
-      "id": "chunk-shipped-512",
-      "tags": [
-        "diag_chunk"
-      ],
-      "filter": "deep_negative_shops",
-      "kind": "benchmark",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807
-    },
-    {
-      "id": "chunk-64",
-      "tags": [
-        "diag_chunk"
-      ],
-      "filter": "diag_dns_chunk64",
-      "kind": "benchmark",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "chunk-shipped-512"
-    },
-    {
-      "id": "chunk-256",
-      "tags": [
-        "diag_chunk"
-      ],
-      "filter": "diag_dns_chunk256",
-      "kind": "benchmark",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "chunk-shipped-512"
-    },
-    {
-      "id": "chunk-512",
-      "tags": [
-        "diag_chunk"
-      ],
-      "filter": "diag_dns_chunk512",
-      "kind": "benchmark",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "chunk-shipped-512"
-    },
-    {
-      "id": "chunk-1024",
-      "tags": [
-        "diag_chunk"
-      ],
-      "filter": "diag_dns_chunk1024",
-      "kind": "benchmark",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "chunk-shipped-512"
-    },
-    {
-      "id": "chunk-2048",
-      "tags": [
-        "diag_chunk"
-      ],
-      "filter": "diag_dns_chunk2048",
-      "kind": "benchmark",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "chunk-shipped-512"
-    },
-    {
-      "id": "chunk-128",
-      "tags": [
-        "diag_chunk"
-      ],
-      "filter": "diag_dns_chunk128",
-      "kind": "benchmark",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "chunk-shipped-512"
-    },
-    {
-      "id": "sub-baseline",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "deep_negative_shops",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807
-    },
-    {
-      "id": "sub-cardtype",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_cardtype",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-edition",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_edition",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-packcontents",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_packcontents",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-packsel",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_packsel",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-rareid-base",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_rareid_base",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-rareid-resample",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_rareid_resample",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-rarity",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_rarity",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-tags",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_tags",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-uncid-base",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_uncid_base",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-uncid-resample",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_uncid_resample",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "sub-vouchers",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sub"
-      ],
-      "filter": "dns_sub_vouchers",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sub-baseline"
-    },
-    {
-      "id": "iso-whole-filter",
-      "kind": "benchmark",
-      "tags": [
-        "diag_iso"
-      ],
-      "filter": "deep_negative_shops",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807
-    },
-    {
-      "id": "iso-cardtype",
-      "kind": "benchmark",
-      "tags": [
-        "diag_iso"
-      ],
-      "filter": "dns_iso_cardtype",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "iso-whole-filter"
-    },
-    {
-      "id": "iso-packs",
-      "kind": "benchmark",
-      "tags": [
-        "diag_iso"
-      ],
-      "filter": "dns_iso_packs",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "iso-whole-filter"
-    },
-    {
-      "id": "iso-rareid",
-      "kind": "benchmark",
-      "tags": [
-        "diag_iso"
-      ],
-      "filter": "dns_iso_rareid",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "iso-whole-filter"
-    },
-    {
-      "id": "iso-rarity-edition",
-      "kind": "benchmark",
-      "tags": [
-        "diag_iso"
-      ],
-      "filter": "dns_iso_rarity_edition",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "iso-whole-filter"
-    },
-    {
-      "id": "iso-uncid",
-      "kind": "benchmark",
-      "tags": [
-        "diag_iso"
-      ],
-      "filter": "dns_iso_uncid",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "iso-whole-filter"
-    },
-    {
-      "id": "iso-vouchers-tags",
-      "kind": "benchmark",
-      "tags": [
-        "diag_iso"
-      ],
-      "filter": "dns_iso_vouchers_tags",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "iso-whole-filter"
-    },
-    {
-      "id": "sched-baseline",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sched"
-      ],
-      "filter": "deep_negative_shops",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807
-    },
-    {
-      "id": "sched-interleaved-re",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sched"
-      ],
-      "filter": "dns_sched_interleaved_re",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sched-baseline"
-    },
-    {
-      "id": "sched-packs-hoisted",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sched"
-      ],
-      "filter": "dns_sched_packs_hoisted",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sched-baseline"
-    },
-    {
-      "id": "sched-rare-first",
-      "kind": "benchmark",
-      "tags": [
-        "diag_sched"
-      ],
-      "filter": "dns_sched_rare_first",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "sched-baseline"
-    },
-    {
-      "id": "div-baseline",
-      "kind": "benchmark",
-      "tags": [
-        "diag_div"
-      ],
-      "filter": "deep_negative_shops",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807
-    },
-    {
-      "id": "div-frames-uniform",
-      "kind": "benchmark",
-      "tags": [
-        "diag_div"
-      ],
-      "filter": "dns_div_frames_uniform",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "div-baseline"
-    },
-    {
-      "id": "div-jokers-uniform",
-      "kind": "benchmark",
-      "tags": [
-        "diag_div"
-      ],
-      "filter": "dns_div_jokers_uniform",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "div-baseline"
-    },
-    {
-      "id": "div-resample-max",
-      "kind": "benchmark",
-      "tags": [
-        "diag_div"
-      ],
-      "filter": "dns_div_resample_max",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "div-baseline"
-    },
-    {
-      "id": "div-resample-mean",
-      "kind": "benchmark",
-      "tags": [
-        "diag_div"
-      ],
-      "filter": "dns_div_resample_mean",
-      "seed": "11111111",
-      "count": {
-        "pocl": 2048,
-        "rtx5080": 344064
-      },
-      "cutoff": 9223372036854775807,
-      "compare_to": "div-baseline"
-    },
     {
       "id": "ctl-a",
       "kind": "benchmark",
@@ -829,11 +68,11 @@
     },
     {
       "id": "packs-legacy",
+      "kind": "benchmark",
       "tags": [
         "diag_packs"
       ],
       "filter": "dns_packs_legacy",
-      "kind": "benchmark",
       "seed": "11111111",
       "count": {
         "pocl": 2048,
@@ -843,11 +82,11 @@
     },
     {
       "id": "packs-phased",
+      "kind": "benchmark",
       "tags": [
         "diag_packs"
       ],
       "filter": "deep_negative_shops",
-      "kind": "benchmark",
       "seed": "11111111",
       "count": {
         "pocl": 2048,
@@ -855,6 +94,95 @@
       },
       "cutoff": 9223372036854775807,
       "compare_to": "packs-legacy"
+    },
+    {
+      "id": "chunk-shipped-1024",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "deep_negative_shops",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807
+    },
+    {
+      "id": "chunk-64",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk64",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
+    },
+    {
+      "id": "chunk-128",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk128",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
+    },
+    {
+      "id": "chunk-256",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk256",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
+    },
+    {
+      "id": "chunk-512",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk512",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
+    },
+    {
+      "id": "chunk-2048",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk2048",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
     }
   ]
 }

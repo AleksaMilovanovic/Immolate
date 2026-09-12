@@ -31,30 +31,19 @@ a filter changes. An unknown name reports both paths it tried.
 
 ## Diagnostic profiles
 
-`tests/diagnostics.json` holds 43 ablation fixtures used to work out what the kernel is actually bound
-by. They are timing-only and never compared against a golden.
+`tests/diagnostics.json` holds timing fixtures for `deep_negative_shops`. They are timing-only and
+never compared against a golden.
 
 ```bash
-python3 tests/run.py --profile diag-stage1 --scale rtx5080   # the three decisive experiments
-python3 tests/run.py --profile diag-rng --scale rtx5080      # RNG component ablations + ILP probe
-python3 tests/run.py --profile diag-dns --scale rtx5080      # DNS per-stream ablations
-python3 tests/run.py --profile diag-mem --scale rtx5080      # footprint: ballast + CACHE_SIZE sweep
-python3 tests/run.py --profile diag-all --scale rtx5080      # all of the above
+python3 tests/run.py --profile diag-packs --scale rtx5080   # pack restructure A/B
+python3 tests/run.py --profile diag-chunk --scale rtx5080   # DNS_CHUNK sweep
+python3 tests/run.py --profile diag-all --scale rtx5080
 ```
 
-**Every filter named `diag_*` produces deliberately wrong scores.** They are cost-attribution
-ablations, not correctness artefacts; none may ever be added to `tests/golden/` or to a
-golden-comparing profile. The exceptions are `diag_rng_a6_exact` and `dns_staged_resample*`, which
-are exact and were verified score-identical to their baselines.
-
-Benchmark seed counts are whole multiples of the RTX 5080 launch width (43,008 lanes = 84 CU x 16
-groups x 32) so every lane gets at least ten seeds. Use `--count-scale` to trade wall time against
-precision without editing the cases file, and `tests/dispatch_bench.py calibrate` to size a run for a
-target duration first. Launch-geometry questions that no cases file can express (`-g` and local-size
-sweeps, register caps, `--from` host I/O) live in `tests/dispatch_bench.py`.
-
-See [docs/diagnostics.md](../docs/diagnostics.md) for the run order, what each fixture predicts under
-each competing model, and how to read the results.
+Every fixture is a thin `#include` wrapper around the live filter, so none can drift out of sync.
+`ctl-a`/`ctl-b` are a byte-identical control pair and must read 1.000x +/- 0.5%; if they do not,
+register allocation is not controlled and no other ratio in the run is readable. See
+[docs/optimization.md](../docs/optimization.md).
 
 ## Shorter profiles
 
