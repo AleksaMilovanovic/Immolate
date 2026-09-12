@@ -1,6 +1,13 @@
 build
 filters/test.cl
 .kernel_cache/
-test*
+test-results/
+__pycache__/
+*.pyc
 *.seeds
 output/
+
+# Local PoCL build (macOS: Apple GPUs cannot run the fp64 kernels)
+build-pocl/
+# Agent worktrees
+.claude/

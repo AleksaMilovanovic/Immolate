@@ -16,10 +16,12 @@ Total = copy*W_COPY + uncommon*W_UNC + other*W_OTHER + tag1*W_TAG1 + tag2*W_TAG2
 """
 import argparse
 import sys
+import heapq
 
 
-def parse(lines):
+def parse(lines, get_total_value, max_rows):
     rows = []
+    heapq.heapify(rows)
     for line in lines:
         line = line.strip()
         sep = line.find(" (")
@@ -35,7 +37,12 @@ def parse(lines):
         other = value % 1000; value //= 1000
         unc = value % 1000; value //= 1000
         copy = value
-        rows.append((seed, copy, unc, other, tag1, tag2))
+        total = get_total_value((seed, copy, unc, other, tag1, tag2))
+        if len(rows) >= max_rows:
+            if total > rows[0][0]:
+                heapq.heapreplace(rows, (total, seed, copy, unc, other, tag1, tag2))
+        else:
+            heapq.heappush(rows, (total, seed, copy, unc, other, tag1, tag2))
     return rows
 
 
@@ -52,16 +59,16 @@ def main():
     a = ap.parse_args()
 
     src = open(a.file, encoding="utf-8", errors="replace") if a.file else sys.stdin
-    rows = parse(src)
+    get_total_value = lambda r: r[1] * a.copy + r[2] * a.uncommon + r[3] * a.other + r[4] * a.tag1 + r[5] * a.tag2
+    rows = parse(src, get_total_value, a.n)
     if not rows:
         sys.exit("no 'SEED (score)' lines found")
 
     ranked = []
-    for seed, copy, unc, other, tag1, tag2 in rows:
-        total = copy * a.copy + unc * a.uncommon + other * a.other + tag1 * a.tag1 + tag2 * a.tag2
+    for seed, copy, unc, other, tag1, tag2, total in rows:
         ranked.append((seed, copy, unc, other, tag1, tag2, total))
-    # Primary key total, then copy, uncommon, other; stable sort so ties keep file order.
-    ranked.sort(key=lambda r: (r[6], r[1], r[2], r[3]), reverse=True)
+    # Primary key total, uncommon, copy, other; stable sort so ties keep file order.
+    ranked.sort(key=lambda r: (r[6], r[2], r[1], r[3]), reverse=True)
 
     top = ranked[: a.top]
     if a.csv:

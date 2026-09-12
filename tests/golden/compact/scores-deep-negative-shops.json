@@ -1,0 +1,34 @@
+{
+  "algorithm": "sha256",
+  "block_size": 64,
+  "blocks": [
+    {
+      "count": 64,
+      "sha256": "78aa526f9356c937be92c1b0a112aadcef05c5b12a8b61128949110e0cf4c8e5",
+      "start_rank": 66231629136
+    },
+    {
+      "count": 64,
+      "sha256": "0963c9da69a7a0894fce030fc3524407b8d9d901e81ca9c34eacc156992e0e07",
+      "start_rank": 66231629200
+    },
+    {
+      "count": 64,
+      "sha256": "2a08d3649510b70ff88dbaa8b0631073d3ce3939913ae9927243c6ed2e1dcec4",
+      "start_rank": 66231629264
+    },
+    {
+      "count": 64,
+      "sha256": "a01be418d38a6d453ade0b5d5118fd1d523338b2cd9517fc2423583245b27abf",
+      "start_rank": 66231629328
+    }
+  ],
+  "case_id": "scores-deep-negative-shops",
+  "case_sha256": "895deb91ef3e77768169f0f1acbee3cee1d8dc8569ef0f97bc8b9af949b7b20e",
+  "count": 256,
+  "filter": "deep_negative_shops",
+  "format": "immolate-score-hashes-v1",
+  "start_rank": 66231629136,
+  "type": "score_hashes",
+  "whole_sha256": "04a966a3e2d076f2133e47478662d0709cc0916d6660c9eae8b418b1171498aa"
+}

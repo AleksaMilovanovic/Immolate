@@ -10,15 +10,48 @@
 #define RUN_FILTER(inst_ptr) filter(inst_ptr)
 #endif
 
+// Temporary benchmark fixtures can define this to compile the previous range
+// walker from the same checkout. Normal filters derive each iteration's seed
+// directly from its rank, avoiding s_tell() inside s_skip().
+#ifdef SEARCH_LEGACY_RANGE_SEED_STEPPING
+#define RANGE_SEED_STATE(name, rank) seed name = s_from_rank(rank)
+#define RANGE_SEED_LOAD(name, rank) ((void)0)
+#define RANGE_SEED_ADVANCE(name, stride) s_skip(&(name), stride)
+#else
+#define RANGE_SEED_STATE(name, rank) ((void)0)
+#define RANGE_SEED_LOAD(name, rank) seed name = s_from_rank(rank)
+#define RANGE_SEED_ADVANCE(name, stride) ((void)0)
+#endif
+
+// Exact score stream for a contiguous range. Each logical rank owns one output
+// slot, so the host can read scores back in rank order without atomics or
+// sorting. A literal cutoff of zero forces FILTER_USES_CUTOFF filters down their
+// full-score path; no prefilter or printing is involved.
+__kernel void search_scores(long start_rank, long num_seeds, __global long* out) {
+    const long filter_cutoff = 0;
+    long i = get_global_id(0);
+    if (i >= num_seeds) return;
+    long stride = get_global_size(0);
+    RANGE_SEED_STATE(_seed, start_rank + i);
+    for (; i < num_seeds; i += stride) {
+        RANGE_SEED_LOAD(_seed, start_rank + i);
+        instance inst;
+        i_init(&inst, _seed);
+        out[i] = RUN_FILTER(&inst);
+        RANGE_SEED_ADVANCE(_seed, stride);
+    }
+}
+
 // Single-pass search: every seed in [start_rank, start_rank + num_seeds) runs
-// the filter and is printed if its score reaches the -c cutoff. Each lane
-// derives its first seed from its rank once, then steps by the stride.
+// the filter and is printed if its score reaches the -c cutoff. Each iteration
+// derives its seed directly from the logical rank already tracked by the loop.
 __kernel void search(long start_rank, long num_seeds, long filter_cutoff) {
     long i = get_global_id(0);
     if (i >= num_seeds) return;
     long stride = get_global_size(0);
-    seed _seed = s_from_rank(start_rank + i);
+    RANGE_SEED_STATE(_seed, start_rank + i);
     for (; i < num_seeds; i += stride) {
+        RANGE_SEED_LOAD(_seed, start_rank + i);
         instance inst;
         i_init(&inst, _seed);
         long score = RUN_FILTER(&inst);
@@ -26,7 +59,7 @@ __kernel void search(long start_rank, long num_seeds, long filter_cutoff) {
         if (score >= filter_cutoff) {
             s_print_score(&_seed, score);
         }
-        s_skip(&_seed, stride);
+        RANGE_SEED_ADVANCE(_seed, stride);
     }
 }
 
@@ -83,17 +116,18 @@ inline void collect_flush(long mine[], int n, __global long* out, volatile __glo
     __local uint group_count;                                                           \
     long gsize = get_global_size(0);                                                    \
     long i = get_global_id(0);                                                          \
-    seed _seed = s_from_rank(start_rank + (i < num_seeds ? i : 0));                     \
+    RANGE_SEED_STATE(_seed, start_rank + (i < num_seeds ? i : 0));                      \
     long mine[COLLECT_CHUNK];                                                           \
     long rounds = (num_seeds + gsize * COLLECT_CHUNK - 1) / (gsize * COLLECT_CHUNK);    \
     for (long r = 0; r < rounds; r++) {                                                 \
         int n = 0;                                                                      \
         for (int k = 0; k < COLLECT_CHUNK; k++) {                                       \
             if (i < num_seeds) {                                                        \
+                RANGE_SEED_LOAD(_seed, start_rank + i);                                 \
                 instance inst;                                                          \
                 i_init(&inst, _seed);                                                   \
                 if (PRED) mine[n++] = start_rank + i;                                   \
-                s_skip(&_seed, gsize);                                                  \
+                RANGE_SEED_ADVANCE(_seed, gsize);                                       \
                 i += gsize;                                                             \
             }                                                                           \
         }                                                                               \

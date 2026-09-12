@@ -68,6 +68,13 @@ inline void drs_count(rarity r, int* rare, int* uncommon, int* common) {
     else if (r == Rarity_Common) (*common)++;
 }
 
+inline rarity drs_shop_rarity_bound(instance* inst, rng_node_id node_id) {
+    double randomNumber = random_bound(inst, node_id);
+    if (randomNumber > 0.95) return Rarity_Rare;
+    if (randomNumber > 0.7) return Rarity_Uncommon;
+    return Rarity_Common;
+}
+
 long filter(instance* inst) {
     for (int i = 0; i < (int)(sizeof(DRS_UPGRADE_VOUCHERS) / sizeof(item)); i++) i_lock(inst, DRS_UPGRADE_VOUCHERS[i]);
     shop shopInstance = get_shop_instance(inst);
@@ -88,10 +95,19 @@ long filter(instance* inst) {
         if (overstock || ante >= 12) frameSize = 3;
         if (overstockPlus || ante >= 24) frameSize = 4;
         int cards = drs_frames(ante) * frameSize;
+        rng_node_id cardTypeNode = rng_node_resolve(inst,
+            (__private ntype[]){N_Type, N_Ante},
+            (__private int[]){R_Card_Type, ante}, 2);
+        rng_node_id shopRarityNode = RNG_NODE_INVALID;
         for (int i = 0; i < cards; i++) {
-            double card_type = random(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2) * totalRate;
+            double card_type = random_bound(inst, cardTypeNode) * totalRate;
             if (get_item_type(shopInstance, card_type) != ItemType_Joker) continue;
-            drs_count(next_joker_rarity(inst, S_Shop, ante), &rare, &uncommon, &common);
+            if (shopRarityNode == RNG_NODE_INVALID) {
+                shopRarityNode = rng_node_resolve(inst,
+                    (__private ntype[]){N_Type, N_Ante, N_Source},
+                    (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
+            }
+            drs_count(drs_shop_rarity_bound(inst, shopRarityNode), &rare, &uncommon, &common);
         }
         for (int p = 0; p < DRS_PACKS; p++) {
             pack _pack = pack_info(next_pack(inst, ante));

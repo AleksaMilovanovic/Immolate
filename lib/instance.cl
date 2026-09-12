@@ -1,12 +1,19 @@
 // Contains settings used for different packs
 // Level means level of the voucher, level 0 -> no voucher, level 1 -> base voucher, level 2 -> upgraded voucher
+// INSTANCE_NO_DECK drops the 52-item starting-deck array from the per-work-item
+// instance. It is a private-memory footprint switch for filters that never call
+// the deck path (init_deck / get_deck / anything reading params.deckCards); such
+// a filter would fail to compile rather than read a missing array, so the switch
+// cannot silently change results. Undefined by default: layout is unchanged.
 typedef struct InstanceParameters {
     item deck;
     item stake;
     bool vouchers[32];
     bool showman;
 
+#ifndef INSTANCE_NO_DECK
     item deckCards[52];
+#endif
     int deckSize;
     int handSize;
 } instance_params;
@@ -57,6 +64,7 @@ void i_init(instance* inst, seed s) {
     inst->hashedSeed = pseudohash_seed(&s);
     inst->rngCache.generatedFirstPack = false;
     inst->rngCache.reportedOverflow = false;
+    inst->rngCache.lastNode = -1;
     inst->rngCache.nextFreeNode = 0;
     inst->seedHashValid = 0UL; // entries are written before they are read
     // rng is only consumed after a seeded call, but keep the old zeroed state
@@ -74,26 +82,32 @@ void i_init(instance* inst, seed s) {
     for (int i = 0; i < 32; i++) {
         inst->params.vouchers[i] = false;
     }
+#ifndef INSTANCE_NO_DECK
     for (int i = 0; i < 52; i++) {
         inst->params.deckCards[i] = RETRY;
     }
+#endif
     inst->params.deckSize = 52;
     inst->params.handSize = 8;
 }
-double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
-    double temp = 0; // will store value set to node, which has some post-processing at the end
-    int node_id = -1;
+rng_node_id rng_node_resolve(instance* inst, ntype nts[], int ids[], int num) {
+    rng_node_id node_id = RNG_NODE_INVALID;
     // The (type, value) pairs and the depth are packed into one 64-bit key, so
     // the lookup is a single compare per cached node instead of a nested loop.
     ulong key = node_key(nts, ids, num);
-    // Check if node exists
-    for (int i = 0; i < inst->rngCache.nextFreeNode; i++) {
-        if (inst->rngCache.nodes[i].key == key) {
-            node_id = i;
-            break;
+    int lastNode = inst->rngCache.lastNode;
+    if (lastNode >= 0 && inst->rngCache.nodes[lastNode].key == key) {
+        node_id = lastNode;
+    } else {
+        // Recent node streams are usually reused first within the current ante.
+        for (int i = inst->rngCache.nextFreeNode - 1; i >= 0; i--) {
+            if (inst->rngCache.nodes[i].key == key) {
+                node_id = i;
+                break;
+            }
         }
     }
-    if (node_id == -1) {
+    if (node_id == RNG_NODE_INVALID) {
         node_id = init_node(&(inst->rngCache), key);
         // pseudohash(name_0 + ... + name_{num-1} + seed), streamed. The hash
         // consumes the string from its last character to its first, so the
@@ -131,8 +145,19 @@ double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
         }
         inst->rngCache.nodes[node_id].rngState = h;
     }
+    return node_id;
+}
+inline double rng_node_advance(instance* inst, rng_node_id node_id) {
+    inst->rngCache.lastNode = (short)node_id;
     inst->rngCache.nodes[node_id].rngState = roundDigits(fract(inst->rngCache.nodes[node_id].rngState*1.72431234+2.134453429141),13);
     return (inst->rngCache.nodes[node_id].rngState + inst->hashedSeed)/2;
+}
+inline double get_node_child(instance* inst, ntype nts[], int ids[], int num) {
+    return rng_node_advance(inst, rng_node_resolve(inst, nts, ids, num));
+}
+inline double random_bound(instance* inst, rng_node_id node_id) {
+    inst->rng = randomseed(rng_node_advance(inst, node_id));
+    return l_random(&(inst->rng));
 }
 double random(instance* inst, ntype nts[], int ids[], int num) {
     if (num > 0) {

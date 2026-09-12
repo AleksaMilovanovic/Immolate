@@ -1,0 +1,188 @@
+{
+  "schema": 1,
+  "_comment": [
+    "Timing fixtures for deep_negative_shops. Every one is a thin #include wrapper",
+    "around the live filter, so none can drift out of sync with it.",
+    "ctl-a/ctl-b are a byte-identical pair and MUST read 1.000x +/- 0.5%. If they do",
+    "not, register allocation is not controlled and no other ratio is readable.",
+    "On NVIDIA the build pins -cl-nv-maxrregcount=128 automatically.",
+    "Counts are 8x the rtx5080 launch width (43008 lanes)."
+  ],
+  "profiles": {
+    "diag-ctl": [
+      "diag_ctl"
+    ],
+    "diag-packs": [
+      "diag_ctl",
+      "diag_packs"
+    ],
+    "diag-chunk": [
+      "diag_ctl",
+      "diag_chunk"
+    ],
+    "diag-all": [
+      "diag_ctl",
+      "diag_packs",
+      "diag_chunk"
+    ]
+  },
+  "scales": {
+    "pocl": {
+      "batch": 65536,
+      "benchmark_repeats": 3
+    },
+    "rtx5080": {
+      "batch": 1048576,
+      "benchmark_repeats": 3
+    }
+  },
+  "cases": [
+    {
+      "id": "ctl-a",
+      "kind": "benchmark",
+      "tags": [
+        "diag_ctl"
+      ],
+      "filter": "deep_negative_shops",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807
+    },
+    {
+      "id": "ctl-b",
+      "kind": "benchmark",
+      "tags": [
+        "diag_ctl"
+      ],
+      "filter": "dns_staged_resample",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "ctl-a"
+    },
+    {
+      "id": "packs-legacy",
+      "kind": "benchmark",
+      "tags": [
+        "diag_packs"
+      ],
+      "filter": "dns_packs_legacy",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807
+    },
+    {
+      "id": "packs-phased",
+      "kind": "benchmark",
+      "tags": [
+        "diag_packs"
+      ],
+      "filter": "deep_negative_shops",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "packs-legacy"
+    },
+    {
+      "id": "chunk-shipped-1024",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "deep_negative_shops",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807
+    },
+    {
+      "id": "chunk-64",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk64",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
+    },
+    {
+      "id": "chunk-128",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk128",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
+    },
+    {
+      "id": "chunk-256",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk256",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
+    },
+    {
+      "id": "chunk-512",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk512",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
+    },
+    {
+      "id": "chunk-2048",
+      "kind": "benchmark",
+      "tags": [
+        "diag_chunk"
+      ],
+      "filter": "diag_dns_chunk2048",
+      "seed": "11111111",
+      "count": {
+        "pocl": 2048,
+        "rtx5080": 344064
+      },
+      "cutoff": 9223372036854775807,
+      "compare_to": "chunk-shipped-1024"
+    }
+  ]
+}

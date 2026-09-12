@@ -1,0 +1,24 @@
+{
+  "algorithm": "sha256",
+  "block_size": 16,
+  "blocks": [
+    {
+      "count": 16,
+      "sha256": "5f9bb7303592a0cd90a265db0aa2d490b80c6d9a3cb173f1045dccb5d28fe5c7",
+      "start_rank": 66231629128
+    },
+    {
+      "count": 16,
+      "sha256": "15de0e21cd89008ffe89ac370d3dfb3492bf50e700d6da6b3df579582813f29c",
+      "start_rank": 66231629144
+    }
+  ],
+  "case_id": "scores-erratic-length-boundary",
+  "case_sha256": "5a79c5a3520d7c374e22fe30d23f5bd40fcbb0a6acb2221742c81178160c946a",
+  "count": 32,
+  "filter": "erratic_flush_five",
+  "format": "immolate-score-hashes-v1",
+  "start_rank": 66231629128,
+  "type": "score_hashes",
+  "whole_sha256": "f13218086a62ac34d0152a792cb0c7a3e4e3a144c1bbf0932f0eb205d42388f9"
+}

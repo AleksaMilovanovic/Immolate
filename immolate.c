@@ -1,10 +1,48 @@
 #include "lib/immolate.h"
 #include "lib/supplier.h"
+#include "lib/scorefile.h"
+#include <errno.h>
 #include <time.h>
+
+// Wall-clock seconds from a monotonic-ish source. `clock()` returns PROCESS CPU
+// time summed over every thread, which on a multi-threaded CPU OpenCL device
+// (PoCL) reports several times the elapsed time -- a 1.7 s run printed 6.75 s.
+// On a GPU it happens to track wall time only because the host spins in
+// clFinish, so the same number means two different things depending on the
+// device. timespec_get(TIME_UTC) is C11 and available on every target this
+// builds for; the searcher only ever uses it for a difference.
+static double wall_seconds(void) {
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
 
 // Launch a 1-D kernel over numGroups work-groups. If the driver rejects the
 // work-group size for this kernel, halve it once and retry; the new geometry is
 // written back so later launches use it too.
+// Where a kernel by name lives. `filters/` holds real search filters -- things
+// that take seeds in and produce a smaller set of seeds out. `diagnostics/`
+// holds fixtures that exist for timing and cost attribution, most of which
+// deliberately return meaningless scores. Both the kernel #include and the
+// compiled-binary cache key need the right directory, so probe for the file:
+// next to the executable first, then relative to the working directory, which
+// is how search.cl is already located.
+static const char* filter_dir(const char* executable_dir, const char* filter) {
+    static const char* const dirs[] = { "filters", "diagnostics" };
+    char probe[MAX_PATH + 288];
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+        FILE* f;
+        snprintf(probe, sizeof probe, "%s%s%s%s%s.cl",
+                 executable_dir, PATH_SEPARATOR, dirs[i], PATH_SEPARATOR, filter);
+        f = fopen(probe, "r");
+        if (f) { fclose(f); return dirs[i]; }
+        snprintf(probe, sizeof probe, "%s%s%s.cl", dirs[i], PATH_SEPARATOR, filter);
+        f = fopen(probe, "r");
+        if (f) { fclose(f); return dirs[i]; }
+    }
+    return NULL;
+}
+
 static cl_int enqueue_1d(cl_command_queue queue, cl_kernel kernel, size_t* globalSize, size_t* localSize, unsigned int numGroups) {
     cl_int err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, globalSize, localSize, 0, NULL, NULL);
     if (err == CL_INVALID_WORK_GROUP_SIZE && *localSize > 1) {
@@ -16,6 +54,148 @@ static cl_int enqueue_1d(cl_command_queue queue, cl_kernel kernel, size_t* globa
     return err;
 }
 
+// Parse a signed 64-bit CLI value without accepting prefixes or overflow. The
+// parsed value is still returned on failure so legacy non-score modes retain
+// their existing coercion behavior; exact-score mode checks the return value.
+static int parse_cl_long_arg(const char* text, cl_long* value) {
+    char* end = NULL;
+    errno = 0;
+    long long parsed = strtoll(text, &end, 10);
+    *value = (cl_long)parsed;
+    return errno != ERANGE && end != text && *end == '\0' && (long long)*value == parsed;
+}
+
+static int cli_is_known_option(const char* text) {
+    static const char* options[] = {
+        "-h", "-f", "-s", "-n", "-c", "-p", "-d", "-g", "-l", "--build_opts",
+        "--list_devices", "--no_cache", "--verbose_build", "--single_pass",
+        "--batch", "--progress", "--to", "--scores_to", "--from",
+        "--to_parts", "--resume"
+    };
+    for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
+        if (strcmp(text, options[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static int cli_value_available(int index, int argc, char** argv) {
+    if (index + 1 < argc && !cli_is_known_option(argv[index + 1])) return 1;
+    fprintf_s(stderr, "%s requires a value.\n", argv[index]);
+    return 0;
+}
+
+static int seed_text_valid(const char* text) {
+    static const char chars[] = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    size_t len = strlen(text);
+    if (len > 8) return 0;
+    for (size_t i = 0; i < len; i++) {
+        if (!strchr(chars, text[i])) return 0;
+    }
+    return 1;
+}
+
+// Run the exact-score kernel in bounded, ascending batches. Any failure closes
+// the writer without setting CLOSED, leaving a self-identifying partial file.
+static int write_score_stream(cl_context ctx, cl_command_queue queue, cl_kernel kernel,
+                              size_t* globalSize, size_t* localSize, unsigned int numGroups,
+                              cl_long startRank, cl_long numSeeds, cl_long batchSeeds,
+                              int progressEvery, const char* path, const char* filter,
+                              clock_t begin) {
+    score_writer writer;
+    cl_mem outBuf = NULL;
+    int64_t* hostScores = NULL;
+    int ok = 0;
+
+    if (!score_writer_open(&writer, path, filter, (int64_t)startRank)) {
+        fprintf_s(stderr, "Cannot open %s for writing.\n", path);
+        return 0;
+    }
+
+    cl_long capacityLong = numSeeds < batchSeeds ? numSeeds : batchSeeds;
+    if (capacityLong < 1) capacityLong = 1;
+    if ((uint64_t)capacityLong > (uint64_t)(SIZE_MAX / sizeof(int64_t))) {
+        fprintf_s(stderr, "Score batch is too large for this host; lower --batch.\n");
+        goto cleanup;
+    }
+    size_t capacity = (size_t)capacityLong;
+    cl_int err;
+    outBuf = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(cl_long) * capacity, NULL, &err);
+    if (err != CL_SUCCESS) {
+        fprintf_s(stderr, "Fatal CL Error %d when creating the score buffer; lower --batch.\n", err);
+        goto cleanup;
+    }
+    hostScores = (int64_t*)malloc(sizeof(int64_t) * capacity);
+    if (!hostScores) {
+        fprintf_s(stderr, "Out of memory for a %lld-score batch; lower --batch.\n", (long long)capacityLong);
+        goto cleanup;
+    }
+    err = clSetKernelArg(kernel, 2, sizeof(cl_mem), &outBuf);
+    if (err != CL_SUCCESS) {
+        fprintf_s(stderr, "Fatal CL Error %d when setting the score output argument.\n", err);
+        goto cleanup;
+    }
+
+    printf_s("Writing %lld exact scores in rank order to %s (cutoff 0, batches of %lld).\n",
+             (long long)numSeeds, path, (long long)batchSeeds);
+    cl_long written = 0;
+    int batches = 0;
+    while (written < numSeeds) {
+        cl_long thisBatch = numSeeds - written < batchSeeds ? numSeeds - written : batchSeeds;
+        cl_long batchStart = startRank + written;
+        err = clSetKernelArg(kernel, 0, sizeof(batchStart), &batchStart);
+        if (err != CL_SUCCESS) {
+            fprintf_s(stderr, "Fatal CL Error %d when setting the score batch start.\n", err);
+            goto cleanup;
+        }
+        err = clSetKernelArg(kernel, 1, sizeof(thisBatch), &thisBatch);
+        if (err != CL_SUCCESS) {
+            fprintf_s(stderr, "Fatal CL Error %d when setting the score batch size.\n", err);
+            goto cleanup;
+        }
+        err = enqueue_1d(queue, kernel, globalSize, localSize, numGroups);
+        if (err != CL_SUCCESS) {
+            fprintf_s(stderr, "Fatal CL Error %d when executing the score kernel.\n", err);
+            goto cleanup;
+        }
+        err = clEnqueueReadBuffer(queue, outBuf, CL_TRUE, 0,
+                                  sizeof(cl_long) * (size_t)thisBatch,
+                                  hostScores, 0, NULL, NULL);
+        if (err != CL_SUCCESS) {
+            fprintf_s(stderr, "Fatal CL Error %d when reading exact scores.\n", err);
+            goto cleanup;
+        }
+        if (!score_writer_append(&writer, hostScores, (size_t)thisBatch)) {
+            fprintf_s(stderr, "Failed writing exact scores to %s.\n", path);
+            goto cleanup;
+        }
+        written += thisBatch;
+        batches++;
+        if (progressEvery > 0 && batches % progressEvery == 0) {
+            double elapsed = (double)(clock() - begin) / CLOCKS_PER_SEC;
+            fprintf(stderr, "[%lld / %lld exact scores written, %.1fs]\n",
+                    (long long)written, (long long)numSeeds, elapsed);
+            fflush(stderr);
+        }
+    }
+    err = clFinish(queue);
+    if (err != CL_SUCCESS) {
+        fprintf_s(stderr, "Fatal CL Error %d when finishing the score stream.\n", err);
+        goto cleanup;
+    }
+    if (!score_writer_close(&writer)) {
+        fprintf_s(stderr, "Failed closing %s.\n", path);
+        goto cleanup;
+    }
+    printf_s("Wrote %lld exact scores to %s.\n", (long long)numSeeds, path);
+    ok = 1;
+
+cleanup:
+    if (!ok && writer.f) score_writer_abort(&writer);
+    free(hostScores);
+    if (outBuf) clReleaseMemObject(outBuf);
+    return ok;
+}
+
 int main(int argc, char **argv) {
     
     // Print version
@@ -25,12 +205,20 @@ int main(int argc, char **argv) {
     unsigned int platformID = 0;
     unsigned int deviceID = 0;
     unsigned int numGroups = 0; // 0 = derive from the device's compute unit count
+    // DIAGNOSTIC ONLY (dispatch bench pack): -l forces the local work-group size
+    // instead of CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, and --build_opts
+    // appends to the string handed to clBuildProgram. Neither is meant to ship;
+    // both exist so a launch-configuration sweep needs no rebuild per point.
+    unsigned int forcedLocal = 0;
+    const char* extraBuildOpts = NULL;
     int noCache = 0;
     int verboseBuild = 0;
     int singlePass = 0;
     cl_long prefilterBatch = 1 << 26; // 67M seeds per pass-1 batch: 512 MB survivor buffer worst case
+    int batchValid = 1;
     int progressEvery = 0;
     const char* toFile = NULL;   // --to: write passing seeds to a supplier file
+    const char* scoresToFile = NULL; // --scores_to: write every exact score in rank order
     const char* fromFile = NULL; // --from: take seeds from a supplier file (first one given; also the "any --from" flag)
     char* fromFiles[SUP_MAX_FILES]; // every --from given, or the parts discovered from a base name
     int numFromFiles = 0;
@@ -44,45 +232,74 @@ int main(int argc, char **argv) {
         startingSeed.s[i] = '\0';
     };
     cl_long numSeeds = 2318107019761;
+    int numSeedsValid = 1;
+    int startingSeedValid = 1;
     cl_long cutoff = 1;
+    int cutoffValid = 1;
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per prefilter batch in a two-pass search. Defaults to 67108864.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--from <FILE>    Search only the seeds listed in seed-supplier file FILE (made with --to) instead of a rank range. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in seed-supplier file FILE (made with --to) instead of a rank range. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
             return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             platformID = atoi(argv[i+1]);
             i++;
         }
         if (strcmp(argv[i],  "-f")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             filter = argv[i+1];
             i++;
         }
         if (strcmp(argv[i],  "-d")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             deviceID = atoi(argv[i+1]);
             i++;
         }
         if (strcmp(argv[i],  "-g")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             numGroups = atoi(argv[i+1]);
             i++;
         }
+        if (strcmp(argv[i],  "-l")==0) { // DIAGNOSTIC: force the local work-group size
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
+            forcedLocal = atoi(argv[i+1]);
+            i++;
+        }
+        if (strcmp(argv[i],  "--build_opts")==0) { // DIAGNOSTIC: extra clBuildProgram options
+            if (i + 1 >= argc) { fprintf_s(stderr, "--build_opts requires a value.\n"); return EXIT_FAILURE; }
+            extraBuildOpts = argv[i+1];
+            // No noCache here: the options are appended to `include_path` below,
+            // and the cache key hashes that string, so each distinct option set
+            // gets its own cache entry. Forcing a rebuild instead made every
+            // --build_opts run pay the full kernel build (~24 s on an RTX 5080),
+            // which swamped the thing being measured -- a maxrregcount sweep came
+            // back at a uniform ~32 s for every cap, including caps above the
+            // kernel's own register usage, which constrain nothing at all.
+            i++;
+        }
         if (strcmp(argv[i],  "-n")==0) {
-            numSeeds = strtoll(argv[i+1], NULL, 10);
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
+            numSeedsValid = parse_cl_long_arg(argv[i+1], &numSeeds);
             i++;
         }
         if (strcmp(argv[i],  "-c")==0) {
-            cutoff = strtoll(argv[i+1], NULL, 10);
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
+            cutoffValid = parse_cl_long_arg(argv[i+1], &cutoff);
             i++;
         }
         if (strcmp(argv[i],  "-s")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             if (strcmp(argv[i+1],"random")==0) {
+                startingSeedValid = 1;
                 srand(time(NULL));
                 char seedCharacters[] = {'1','2','3','4','5','6','7','8','9','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'};
                 for (int j = 0; j < 8; j++) {
                     startingSeed.s[j] = seedCharacters[rand() % 35];
                 }
             } else if (strlen(argv[i+1]) <= 8) {
+                startingSeedValid = seed_text_valid(argv[i+1]);
                 for (int j = 0; j < strlen(argv[i+1]); j++) {
                     startingSeed.s[j] = argv[i+1][j];
                 }
@@ -90,6 +307,7 @@ int main(int argc, char **argv) {
                     startingSeed.s[j] = '\0';
                 }
             } else {
+                startingSeedValid = 0;
                 printf_s("Warning: Inputted seed is not valid, ignoring...\n");
             }
             i++;
@@ -102,28 +320,42 @@ int main(int argc, char **argv) {
             singlePass = 1;
         }
         if (strcmp(argv[i],  "--batch")==0) {
-            prefilterBatch = strtoll(argv[i+1], NULL, 10);
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
+            batchValid = parse_cl_long_arg(argv[i+1], &prefilterBatch) && prefilterBatch >= 1;
             if (prefilterBatch < 1) prefilterBatch = 1;
             i++;
         }
         if (strcmp(argv[i],  "--progress")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             progressEvery = atoi(argv[i+1]);
             i++;
         }
         if (strcmp(argv[i],  "--to")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             toFile = argv[i+1];
             i++;
         }
+        if (strcmp(argv[i],  "--scores_to")==0) {
+            if (i + 1 >= argc || cli_is_known_option(argv[i+1])) {
+                fprintf_s(stderr, "--scores_to requires a file path.\n");
+                return EXIT_FAILURE;
+            }
+            scoresToFile = argv[i+1];
+            i++;
+        }
         if (strcmp(argv[i],  "--from")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             if (!fromFile) fromFile = argv[i+1];
             if (numFromFiles < SUP_MAX_FILES) fromFiles[numFromFiles++] = argv[i+1];
             i++;
         }
         if (strcmp(argv[i],  "--resume")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             resumeFile = argv[i+1];
             i++;
         }
         if (strcmp(argv[i],  "--to_parts")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             toParts = atoi(argv[i+1]);
             if (toParts < 1) toParts = 1;
             i++;
@@ -199,13 +431,37 @@ int main(int argc, char **argv) {
     // --resume: everything about the run is taken from the interrupted part
     // file, so it cannot be resumed under different settings by mistake. Any
     // conflicting flag on this command line is an error, not a silent override.
-    int userFilter = 0, userCutoff = 0, userTo = 0, userParts = 0, userN = 0;
+    int userFilter = 0, userCutoff = 0, userTo = 0, userParts = 0, userN = 0, userBatch = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-f") == 0) userFilter = 1;
         if (strcmp(argv[i], "-c") == 0) userCutoff = 1;
         if (strcmp(argv[i], "-n") == 0) userN = 1;
         if (strcmp(argv[i], "--to") == 0) userTo = 1;
         if (strcmp(argv[i], "--to_parts") == 0) userParts = 1;
+        if (strcmp(argv[i], "--batch") == 0) userBatch = 1;
+    }
+    if (scoresToFile) {
+        if (toFile) { fprintf_s(stderr, "--scores_to cannot be combined with --to.\n"); return EXIT_FAILURE; }
+        if (fromFile) { fprintf_s(stderr, "--scores_to is range-only and cannot be combined with --from.\n"); return EXIT_FAILURE; }
+        if (userParts) { fprintf_s(stderr, "--scores_to cannot be combined with --to_parts.\n"); return EXIT_FAILURE; }
+        if (resumeFile) { fprintf_s(stderr, "--scores_to cannot be combined with --resume.\n"); return EXIT_FAILURE; }
+        if (userCutoff && (!cutoffValid || cutoff != 0)) { fprintf_s(stderr, "--scores_to requires exact cutoff 0; omit -c or pass the integer -c 0.\n"); return EXIT_FAILURE; }
+        if (userBatch && !batchValid) { fprintf_s(stderr, "--scores_to requires --batch to be a positive integer.\n"); return EXIT_FAILURE; }
+        if (!startingSeedValid) { fprintf_s(stderr, "--scores_to requires -s to contain only 1-9 or A-Z, up to eight characters.\n"); return EXIT_FAILURE; }
+        cutoff = 0;
+        if (!userBatch) prefilterBatch = 1 << 20;
+
+        const cl_long totalRanks = 2318107019761LL;
+        cl_long scoreStartRank = seed_rank(&startingSeed);
+        if (!numSeedsValid || numSeeds < 0) {
+            fprintf_s(stderr, "--scores_to requires -n to be a nonnegative integer.\n");
+            return EXIT_FAILURE;
+        }
+        if (scoreStartRank < 0 || scoreStartRank >= totalRanks || numSeeds > totalRanks - scoreStartRank) {
+            fprintf_s(stderr, "--scores_to range %lld + %lld exceeds valid ranks 0..2318107019760.\n",
+                      (long long)scoreStartRank, (long long)numSeeds);
+            return EXIT_FAILURE;
+        }
     }
     static char resumeFilter[64];
     if (resumeFile) {
@@ -269,7 +525,7 @@ int main(int argc, char **argv) {
 
     // Get CWD
     char executable_dir[MAX_PATH];
-    char include_path[MAX_PATH+32];
+    char include_path[MAX_PATH+288]; // +256 of headroom for DIAGNOSTIC --build_opts
     char kernel_path[MAX_PATH+12];
     getExecutableDir(executable_dir);
     strcpy_s(kernel_path, sizeof kernel_path, executable_dir);
@@ -289,16 +545,30 @@ int main(int argc, char **argv) {
         // path, cache-key file hashing and cache directory must use it too.
         strcpy_s(executable_dir, sizeof executable_dir, ".");
     }
+    // Kept as a literal so the fallback below can strip exactly what was added.
+    #define REGISTER_CAP_OPT "-cl-nv-maxrregcount=128"
     strcpy_s(include_path, sizeof include_path, "-I \"");
     strcat_s(include_path, sizeof include_path, executable_dir);
     strcat_s(include_path, sizeof include_path, "\"");
+    if (extraBuildOpts) { // DIAGNOSTIC
+        strcat_s(include_path, sizeof include_path, " ");
+        strcat_s(include_path, sizeof include_path, extraBuildOpts);
+    }
     if (verboseBuild) {
         strcat_s(include_path, sizeof include_path, " -cl-nv-verbose");
     }
     ssKernelCode = (char*)malloc(MAX_CODE_SIZE);
     ssKernelBuf = (char*)malloc(MAX_CODE_SIZE);
     // Set include information
-    strcpy_s(ssKernelCode, MAX_CODE_SIZE, "#include \"filters/");
+    const char* filterDir = filter_dir(executable_dir, filter);
+    if (!filterDir) {
+        fprintf_s(stderr, "Filter \"%s\" not found as filters%s%s.cl or diagnostics%s%s.cl.\n",
+                  filter, PATH_SEPARATOR, filter, PATH_SEPARATOR, filter);
+        exit(EXIT_FAILURE);
+    }
+    strcpy_s(ssKernelCode, MAX_CODE_SIZE, "#include \"");
+    strcat_s(ssKernelCode, MAX_CODE_SIZE, filterDir);
+    strcat_s(ssKernelCode, MAX_CODE_SIZE, "/");
     strcat_s(ssKernelCode, MAX_CODE_SIZE, filter);
     strcat_s(ssKernelCode, MAX_CODE_SIZE, ".cl\"\n\n");
     size_t bytes_read = fread( ssKernelBuf, 1, MAX_CODE_SIZE - 1, fp);
@@ -352,6 +622,29 @@ int main(int argc, char **argv) {
     clErrCheck(err, "clGetDeviceIDs - Getting list of available OpenCL devices");
     cl_device_id device = devices[deviceID];
 
+    // Register cap on NVIDIA. Left to itself the compiler gives these kernels
+    // 137-154 registers, which allows only 12-14 of the 48 possible warps per
+    // SM; capping at 128 raises that to 16. Measured on an RTX 5080 over
+    // 424,984 seeds of deep_negative_shops: 10.474s -> 7.537s, a 1.390x
+    // speedup, with a hard cliff between 136 and 128 and a flat floor below it
+    // (120/112/96 all land within 0.5% of 128, so there is nothing to gain by
+    // capping harder and only spills to lose). Bit-exact: register allocation
+    // and spilling never reorder or re-associate floating-point work, and an
+    // exact-score comparison over 200,000 seeds was identical.
+    // Vendor-guarded because the option is NVIDIA-only (PoCL rejects it with
+    // CL_INVALID_BUILD_OPTIONS), and skipped when the caller set their own cap
+    // via --build_opts. If a driver still rejects it, the build falls back.
+    int cappedRegisters = 0;
+    {
+        char vendorName[256] = {0};
+        if (clGetDeviceInfo(device, CL_DEVICE_VENDOR, sizeof vendorName - 1, vendorName, NULL) == CL_SUCCESS
+            && strstr(vendorName, "NVIDIA") != NULL
+            && (extraBuildOpts == NULL || strstr(extraBuildOpts, "maxrregcount") == NULL)) {
+            strcat_s(include_path, sizeof include_path, " " REGISTER_CAP_OPT);
+            cappedRegisters = 1;
+        }
+    }
+
     // Create an OpenCL context
     cl_context ctx = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
     clErrCheck(err, "clCreateContext - Creating OpenCL context");
@@ -377,7 +670,7 @@ int main(int argc, char **argv) {
         h = fnv1a_buf(h, ssKernelCode, ssKernelSize); // includes the filter #include line
         int ok = 1;
         char src_path[MAX_PATH + 64];
-        snprintf(src_path, sizeof src_path, "%s%sfilters%s%s.cl", executable_dir, PATH_SEPARATOR, PATH_SEPARATOR, filter);
+        snprintf(src_path, sizeof src_path, "%s%s%s%s%s.cl", executable_dir, PATH_SEPARATOR, filterDir, PATH_SEPARATOR, filter);
         h = fnv1a_file(h, src_path, &ok);
         static const char* libFiles[] = {"immolate.cl", "util.cl", "seed.cl", "items.cl", "debug.cl", "cache.cl", "instance.cl", "functions.cl"};
         for (size_t i = 0; i < sizeof(libFiles) / sizeof(libFiles[0]); i++) {
@@ -408,7 +701,7 @@ int main(int argc, char **argv) {
                 if (ssKernelProgram != NULL) clReleaseProgram(ssKernelProgram);
                 ssKernelProgram = NULL;
             } else {
-                printf_s("Loaded compiled kernel from cache (sources hashed under %s%slib and %s%sfilters).\n", executable_dir, PATH_SEPARATOR, executable_dir, PATH_SEPARATOR);
+                printf_s("Loaded compiled kernel from cache (sources hashed under %s%slib and %s%s%s).\n", executable_dir, PATH_SEPARATOR, executable_dir, PATH_SEPARATOR, filterDir);
                 loadedFromCache = 1;
             }
             free(bin);
@@ -432,6 +725,13 @@ build_program:
         printf_s("This driver rejected -cl-nv-verbose (it is NVIDIA-only); rebuilding without it.\n");
         char* opt = strstr(include_path, " -cl-nv-verbose");
         if (opt) *opt = '\0';
+        err = clBuildProgram(ssKernelProgram, 1, &device, include_path, NULL, NULL);
+    }
+    if (cappedRegisters && err == CL_INVALID_BUILD_OPTIONS) {
+        printf_s("This driver rejected " REGISTER_CAP_OPT "; rebuilding without it.\n");
+        char* opt = strstr(include_path, " " REGISTER_CAP_OPT);
+        if (opt) *opt = '\0';
+        cappedRegisters = 0;
         err = clBuildProgram(ssKernelProgram, 1, &device, include_path, NULL, NULL);
     }
     if (err == CL_BUILD_PROGRAM_FAILURE || (verboseBuild && builtFromSource)) { //print build log on error, or always when asked
@@ -492,6 +792,11 @@ build_program:
     clErrCheck(err, "clCreateKernel - Creating search_collect kernel");
     cl_kernel ranksCollectKernel = clCreateKernel(ssKernelProgram, "search_ranks_collect", &err);
     clErrCheck(err, "clCreateKernel - Creating search_ranks_collect kernel");
+    cl_kernel scoresKernel = NULL;
+    if (scoresToFile) {
+        scoresKernel = clCreateKernel(ssKernelProgram, "search_scores", &err);
+        clErrCheck(err, "clCreateKernel - Creating search_scores kernel");
+    }
     cl_int errPre = CL_SUCCESS;
     cl_kernel preKernel = clCreateKernel(ssKernelProgram, "search_prefilter", &errPre);
     if (errPre != CL_SUCCESS) preKernel = NULL;
@@ -530,6 +835,10 @@ build_program:
     // kernel's real limit for CL_KERNEL_WORK_GROUP_SIZE.
     size_t localSize = preferredMultiple;
     if (localSize > maxWorkGroup) localSize = maxWorkGroup;
+    if (forcedLocal > 0) { // DIAGNOSTIC: -l overrides the derived work-group size
+        localSize = forcedLocal;
+        printf_s("Forcing local work-group size %zu (device/kernel would have used %zu).\n", localSize, preferredMultiple);
+    }
     if (numGroups == 0) {
         cl_uint computeUnits = 1;
         err = clGetDeviceInfo(device, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(computeUnits), &computeUnits, NULL);
@@ -704,7 +1013,15 @@ build_program:
     printf_s("Starting searcher...\n");
     fflush(stdout);
     clock_t begin = clock();
-    if (!twoPass && !toFile && !fromFile) {
+    double wallBegin = wall_seconds();
+    int exitCode = EXIT_SUCCESS;
+    if (scoresToFile) {
+        if (!write_score_stream(ctx, queue, scoresKernel, &globalSize, &localSize, numGroups,
+                                startRank, numSeeds, prefilterBatch, progressEvery,
+                                scoresToFile, filter, begin)) {
+            exitCode = EXIT_FAILURE;
+        }
+    } else if (!twoPass && !toFile && !fromFile) {
         // Plain single pass: print straight from the kernel.
         err = enqueue_1d(queue, ssKernel, &globalSize, &localSize, numGroups);
         clErrCheck(err, "clEnqueueNDRangeKernel - Executing OpenCL kernel");
@@ -823,7 +1140,12 @@ build_program:
                     size_t listGroups = ((size_t)thisBatch + localSize - 1) / localSize;
                     if (listGroups > (size_t)numGroups) listGroups = numGroups;
                     size_t listGlobal = listGroups * localSize;
-                    err = clEnqueueNDRangeKernel(queue, k, 1, NULL, &listGlobal, &localSize, 0, NULL, NULL);
+                    // Via enqueue_1d, not a bare clEnqueueNDRangeKernel: this is
+                    // the --from path, and without the shared helper it was the
+                    // only launch in the program with no work-group-size
+                    // fallback, so a driver rejecting localSize here was a hard
+                    // failure instead of a halve-and-retry.
+                    err = enqueue_1d(queue, k, &listGlobal, &localSize, (unsigned int)listGroups);
                     clErrCheck(err, "clEnqueueNDRangeKernel - Executing ranks kernel");
                     if (toFile) {
                         err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
@@ -906,6 +1228,7 @@ build_program:
 
     // Clean up
     if (preKernel) clReleaseKernel(preKernel);
+    if (scoresKernel) clReleaseKernel(scoresKernel);
     clReleaseKernel(ranksKernel);
     clReleaseKernel(collectKernel);
     clReleaseKernel(ranksCollectKernel);
@@ -914,8 +1237,10 @@ build_program:
     err = clReleaseCommandQueue(queue);
     err = clReleaseContext(ctx);
     clock_t end = clock();
-    double time_spent = (double)(end-begin) / CLOCKS_PER_SEC;
-    printf("Done in %fs",time_spent);
+    double cpu_spent = (double)(end-begin) / CLOCKS_PER_SEC;
+    double wall_spent = wall_seconds() - wallBegin;
+    // Wall time first: it is the one that means "how long did this take".
+    printf("Done in %fs (cpu %fs)", wall_spent, cpu_spent);
 
-    return EXIT_SUCCESS;
+    return exitCode;
 }

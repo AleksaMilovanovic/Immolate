@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "profiles": {
+    "smoke": ["benchmark_core"],
+    "quick": ["benchmark_core"],
+    "correctness": ["benchmark_core"],
+    "breadth": ["benchmark_core"],
+    "benchmark": ["benchmark_core"],
+    "all": ["benchmark_core"]
+  },
+  "scales": {
+    "pocl": {
+      "batch": 65536,
+      "benchmark_repeats": 7
+    },
+    "rtx5080": {
+      "batch": 1048576,
+      "benchmark_repeats": 7
+    }
+  },
+  "cases": [
+    {
+      "id": "range-seed-hash-baseline",
+      "kind": "benchmark",
+      "tags": ["benchmark_core"],
+      "filter": "bench_range_seed_baseline_hash",
+      "seed": "11111111",
+      "count": {"pocl": 200000, "rtx5080": 500000000},
+      "cutoff": 11
+    },
+    {
+      "id": "range-seed-hash-candidate",
+      "kind": "benchmark",
+      "tags": ["benchmark_core"],
+      "filter": "bench_hash_fp64",
+      "seed": "11111111",
+      "count": {"pocl": 200000, "rtx5080": 500000000},
+      "cutoff": 11,
+      "compare_to": "range-seed-hash-baseline"
+    },
+    {
+      "id": "range-seed-erratic-baseline",
+      "kind": "benchmark",
+      "tags": ["benchmark_core"],
+      "filter": "bench_range_seed_baseline_erratic",
+      "seed": "11111111",
+      "count": {"pocl": 200000, "rtx5080": 500000000},
+      "cutoff": 53
+    },
+    {
+      "id": "range-seed-erratic-candidate",
+      "kind": "benchmark",
+      "tags": ["benchmark_core"],
+      "filter": "erratic_flush_five",
+      "seed": "11111111",
+      "count": {"pocl": 200000, "rtx5080": 500000000},
+      "cutoff": 53,
+      "compare_to": "range-seed-erratic-baseline"
+    },
+    {
+      "id": "range-seed-wr-baseline",
+      "kind": "benchmark",
+      "tags": ["benchmark_core"],
+      "filter": "bench_range_seed_baseline_wr",
+      "seed": "11111111",
+      "count": {"pocl": 10000, "rtx5080": 500000000},
+      "cutoff": 9223372036854775807
+    },
+    {
+      "id": "range-seed-wr-candidate",
+      "kind": "benchmark",
+      "tags": ["benchmark_core"],
+      "filter": "wr_filter",
+      "seed": "11111111",
+      "count": {"pocl": 10000, "rtx5080": 500000000},
+      "cutoff": 9223372036854775807,
+      "compare_to": "range-seed-wr-baseline"
+    },
+    {
+      "id": "range-seed-dns-baseline",
+      "kind": "benchmark",
+      "tags": ["benchmark_core"],
+      "filter": "bench_range_seed_baseline_dns",
+      "seed": "11111111",
+      "count": {"pocl": 512, "rtx5080": 2048},
+      "cutoff": 9223372036854775807
+    },
+    {
+      "id": "range-seed-dns-candidate",
+      "kind": "benchmark",
+      "tags": ["benchmark_core"],
+      "filter": "deep_negative_shops",
+      "seed": "11111111",
+      "count": {"pocl": 512, "rtx5080": 2048},
+      "cutoff": 9223372036854775807,
+      "compare_to": "range-seed-dns-baseline"
+    }
+  ]
+}

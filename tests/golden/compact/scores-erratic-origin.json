@@ -1,0 +1,34 @@
+{
+  "algorithm": "sha256",
+  "block_size": 512,
+  "blocks": [
+    {
+      "count": 512,
+      "sha256": "63dc0397d1970b0266c2e1e8cd9ff8b0313d84ec00c82879b3cef9f2a4694f12",
+      "start_rank": 0
+    },
+    {
+      "count": 512,
+      "sha256": "f957b34e44a2c99ea445a98abafbacdbdbf026a2ff7a633cb838192218d3f882",
+      "start_rank": 512
+    },
+    {
+      "count": 512,
+      "sha256": "cbcabd53484084c96683a16c498a94933fd474217ba0d67d3242e207b96cf709",
+      "start_rank": 1024
+    },
+    {
+      "count": 512,
+      "sha256": "67b869c5f0dc33a1061f74765406e6f4c2ab1cf684ff451f41a7f172c8be902b",
+      "start_rank": 1536
+    }
+  ],
+  "case_id": "scores-erratic-origin",
+  "case_sha256": "9457ee197fcc033b097007451a09888128304ea76a682a7aa07762df4526b4e8",
+  "count": 2048,
+  "filter": "erratic_flush_five",
+  "format": "immolate-score-hashes-v1",
+  "start_rank": 0,
+  "type": "score_hashes",
+  "whole_sha256": "b66afe7b392bc792732785088ef5f272d65af215e5edfc047195fdad1a61744f"
+}
