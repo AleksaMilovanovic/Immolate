@@ -116,6 +116,9 @@ __constant item DNS_UNLOCKED_RARES[] = {Blueprint, Brainstorm};
 #ifndef DNS_PACKS
 #define DNS_PACKS 6
 #endif
+// DNS_PACKS_LEGACY forces the original one-draw-at-a-time pack loop. It exists
+// only so the phased pack path can be A/B'd against what it replaced; the two
+// are bit-identical, so it should never be defined for a real run.
 
 __constant item DNS_BOUGHT_VOUCHERS[] = {
     Overstock, Overstock_Plus, Clearance_Sale, Liquidation, Reroll_Surplus, Reroll_Glut,
@@ -234,16 +237,20 @@ inline int dns_shop_randindex_scalar(
 // they concentrate. None of this is visible on a CPU OpenCL device.
 // ---------------------------------------------------------------------------
 #ifndef DNS_CHUNK
-#define DNS_CHUNK 512   // shop joker slots staged before identities are drawn
-// Measured on an RTX 5080 (344,064 seeds, register-capped build), against 128:
-//   chunk  64 = 1.158x (worse)   256 = 0.903x   512 = 0.859x
-// The curve had not saturated at 128. Larger is better because a bigger chunk
-// gives each identity pool more ordinals per depth pass, so the depth-major
-// resample chain's trip count concentrates instead of diverging across lanes.
-// Not raised further yet: the staging masks are DNS_CHUNK bits wide, so at 1024
-// the ~5 live masks need ~160 registers and would spill past the 128-register
-// cap. The largest ante has ~660 joker cards, so 1024 would be one chunk per
-// ante and is the most chunking can ever do -- see diag_dns_chunk1024.
+#define DNS_CHUNK 1024  // shop joker slots staged before identities are drawn
+// Measured on an RTX 5080 (344,064 seeds, register-capped build), vs 512:
+//   64 = 1.356x   128 = 1.180x   256 = 1.060x   [512 = 1.000x]   1024 = 0.970x   2048 = 0.972x
+// 1024 is the saturation point and the optimum: the largest ante (38) has 924
+// shop cards and ~660 joker cards, so any chunk >= 1024 is exactly one chunk per
+// ante. 2048 measuring identically (0.2% apart, inside this run's 0.6% control
+// error) confirms that rather than leaving headroom.
+//
+// A predicted register-pressure regression at 1024 did NOT happen. The masks are
+// `ulong w[DNS_MASK_WORDS]` indexed dynamically (`w[o >> 6]`), and a dynamically
+// indexed array cannot live in registers on NVIDIA -- it goes to local memory.
+// So mask width costs frame bytes, not registers, and the 128-register cap is
+// unaffected by DNS_CHUNK. Register headroom is therefore still available for
+// other work.
 #endif
 #if DNS_CHUNK < 1
 #error "DNS_CHUNK must be positive"
@@ -534,15 +541,118 @@ long filter(instance* inst) {
                 inst->rngCache.nodes[shopRareNode].rngState = shopRareState;
         }
         inst->rng = shopRng;
-        for (int p = 0; p < DNS_PACKS; p++) {
-            pack _pack = pack_info(next_pack(inst, ante));
-            if (_pack.type != Buffoon_Pack) continue;
-            item drawn[5];
-            for (int j = 0; j < _pack.size; j++) {
-                dns_joker(inst, S_Buffoon, ante, &c, &drawn[j]);
-                if (!inst->params.showman) i_lock(inst, drawn[j]); // temporary reroll, as buffoon_pack does
+        // -------------------------------------------------------------------
+        // Packs, in three dense phases instead of one divergent loop.
+        //
+        // Measured on an RTX 5080: pack selection and pack contents are 0.74% of
+        // the filter's RNG draws but ~38% of its runtime -- roughly 50x the
+        // average cost per draw. The cause is not the draws, it is that this was
+        // the last stream still running one draw at a time through the lib path,
+        // interleaved with a body only ~8.7% of packs enter. With 32 lanes,
+        // P(at least one lane takes the Buffoon body) = 1 - (1-0.087)^32 = 94.5%,
+        // so every lane paid for the body almost every pack, and the selection
+        // draws were serialised behind it.
+        //
+        // Phase 1 draws all DNS_PACKS selections off one hoisted node state.
+        // Phase 2 draws rarity for every Buffoon card in the ante, densely.
+        // Phase 3 draws identities per pack (they must stay per-pack: a card is
+        //         temporarily locked while later cards in the SAME pack are
+        //         drawn, and randchoice_common resamples against that).
+        // Phase 4 draws editions for every card, densely, and scores.
+        //
+        // Exact: rarity, edition and pack-selection each live on their own
+        // ante-keyed node, and each phase still consumes its node in card order,
+        // so every node sees exactly the sequence it saw before. Only the
+        // interleaving ACROSS nodes changed, which is free -- the same argument
+        // the shop staging rests on. Identity nodes and lock state are untouched.
+        //
+        // Guarded to the ante-keyed pack node (DNS_ANTE_LOCAL_CACHE) and to
+        // ante > 2, because the current next_pack returns a free Buffoon_Pack
+        // for the first pack of ante <= 2 without drawing. DNS_FIRST_ANTE is 3,
+        // so that path is unreachable here, but the guard keeps it correct if
+        // someone lowers DNS_FIRST_ANTE.
+        // -------------------------------------------------------------------
+#if DNS_ANTE_LOCAL_CACHE && !defined(DNS_PACKS_LEGACY)
+        if (ante > 2) {
+            int packSizes[DNS_PACKS];
+            int packCount = 0, packCards = 0;
+            rng_node_id packNode = rng_node_resolve(inst,
+                (__private ntype[]){N_Type, N_Ante},
+                (__private int[]){R_Shop_Pack, ante}, 2);
+            double packState = inst->rngCache.nodes[packNode].rngState;
+            for (int p = 0; p < DNS_PACKS; p++) {
+                // randweightedchoice(PACKS), inlined onto the hoisted state.
+                double poll = dns_random_scalar(inst, &packState, &shopRng) * PACKS[0].weight;
+                int idx = 1;
+                double weight = 0;
+                while (weight < poll) { weight += PACKS[idx].weight; idx++; }
+                pack _pack = pack_info(PACKS[idx - 1]._item);
+                if (_pack.type == Buffoon_Pack) {
+                    packSizes[packCount++] = _pack.size;
+                    packCards += _pack.size;
+                }
             }
-            for (int j = 0; j < _pack.size; j++) i_unlock(inst, drawn[j]);
+            inst->rngCache.nodes[packNode].rngState = packState;
+
+            if (packCards > 0) {
+                rarity rarities[DNS_PACKS * 5];
+                item jokers[DNS_PACKS * 5];
+
+                rng_node_id rarNode = rng_node_resolve(inst,
+                    (__private ntype[]){N_Type, N_Ante, N_Source},
+                    (__private int[]){R_Joker_Rarity, ante, S_Buffoon}, 3);
+                double rarState = inst->rngCache.nodes[rarNode].rngState;
+                for (int i = 0; i < packCards; i++)
+                    rarities[i] = dns_joker_rarity_scalar(inst, &rarState, &shopRng);
+                inst->rngCache.nodes[rarNode].rngState = rarState;
+
+                int at = 0;
+                for (int b = 0; b < packCount; b++) {
+                    item drawn[5];
+                    int sz = packSizes[b];
+                    for (int j = 0; j < sz; j++) {
+                        rarity r = rarities[at + j];
+                        item joker;
+                        if (r == Rarity_Rare)          joker = randchoice_common(inst, R_Joker_Rare, S_Buffoon, ante, RARE_JOKERS);
+                        else if (r == Rarity_Uncommon) joker = randchoice_common(inst, R_Joker_Uncommon, S_Buffoon, ante, UNCOMMON_JOKERS);
+                        else                           joker = randchoice_common(inst, R_Joker_Common, S_Buffoon, ante, COMMON_JOKERS);
+                        jokers[at + j] = joker;
+                        drawn[j] = joker;
+                        if (!inst->params.showman) i_lock(inst, joker); // temporary reroll, as buffoon_pack does
+                    }
+                    for (int j = 0; j < sz; j++) i_unlock(inst, drawn[j]);
+                    at += sz;
+                }
+
+                rng_node_id edNode = rng_node_resolve(inst,
+                    (__private ntype[]){N_Type, N_Source, N_Ante},
+                    (__private int[]){R_Joker_Edition, S_Buffoon, ante}, 3);
+                double edState = inst->rngCache.nodes[edNode].rngState;
+                for (int i = 0; i < packCards; i++) {
+                    bool negative = dns_joker_negative_scalar(inst, &edState, &shopRng);
+                    item joker = jokers[i];
+                    if (joker == Diet_Cola) { c.other++; continue; }
+                    if (!negative) continue;
+                    if (joker == Brainstorm || joker == Blueprint) c.copy++;
+                    else if (rarities[i] == Rarity_Uncommon) c.uncommon++;
+                    else c.other++;
+                }
+                inst->rngCache.nodes[edNode].rngState = edState;
+            }
+            inst->rng = shopRng;
+        } else
+#endif
+        {
+            for (int p = 0; p < DNS_PACKS; p++) {
+                pack _pack = pack_info(next_pack(inst, ante));
+                if (_pack.type != Buffoon_Pack) continue;
+                item drawn[5];
+                for (int j = 0; j < _pack.size; j++) {
+                    dns_joker(inst, S_Buffoon, ante, &c, &drawn[j]);
+                    if (!inst->params.showman) i_lock(inst, drawn[j]); // temporary reroll, as buffoon_pack does
+                }
+                for (int j = 0; j < _pack.size; j++) i_unlock(inst, drawn[j]);
+            }
         }
     }
 #if DIAG_BALLAST_KB > 0

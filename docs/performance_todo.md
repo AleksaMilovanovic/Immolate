@@ -1,50 +1,80 @@
-# Performance follow-ups (not implemented)
+# Performance follow-ups
 
-> **2026-09-11 RESULTS — measured on an RTX 5080, 344,064 seeds of deep_negative_shops.**
-> Two changes landed, together **2.812x** (8.577s -> 3.050s; 40,115 -> 112,808 seeds/s).
-> Both bit-exact, verified by exact-score comparison.
+> **2026-09-11 RESULTS — RTX 5080, 344,064 seeds of deep_negative_shops.**
+> **3.375x landed and bit-exact** (8.577s -> 2.541s; 40,115 -> 112,808 seeds/s).
 >
 > | change | speedup |
 > |---|---|
-> | `dns_staged_resample`: depth-major identity resamples, 128-slot staging chunk | 2.076x |
+> | depth-major identity resamples + staging chunk | 2.076x |
 > | `-cl-nv-maxrregcount=128` on NVIDIA (12-14 -> 16 resident warps) | 1.390x |
-> | **combined (97.4% composition efficiency)** | **2.812x** |
+> | staging chunk 128 -> 512 | 1.164x |
+> | staging chunk 512 -> 1024 (saturation: one chunk per ante) | 1.031x |
+> | **cumulative** | **3.375x** |
 >
-> **Measured ceilings — these close most of the list below.** From ablation fixtures,
-> `ceiling = (1 - ratio) / 0.941`:
+> Pending measurement: the pack path restructured into four dense phases
+> (`diag-packs` profile; `dns_packs_legacy` is the A/B baseline).
 >
-> | ablation | ratio | ceiling |
-> |---|---|---|
-> | remove the ENTIRE RNG core | 0.815 | **19.7%** |
-> | remove `roundDigits` | 0.886 | 12.1% |
-> | remove the 10-round Tausworthe warmup | 0.929 | **7.5%** |
-> | integer node recurrence (`rng_advance_int`) | 0.964 | **3.8%** |
-> | remove the lock/resample machinery | 0.233 | **81.5%** |
+> ## Measured cost profile (factor-isolation suite, `--profile diag-factors`)
 >
-> The last row is why the staging change was the win: the resample loops are 4.9% of
-> draws and 77% of runtime. Everything fp64 is capped at 19.7% *in total*.
+> Draw counts do NOT predict cost. Cost per draw spans 170x across streams:
 >
-> - **Item 1 is DONE** (shipped as `seedHashByLen`; seed-suffix hashing is 104 of 11,334
->   `ph_step` calls = 0.9%).
-> - **Item 2 is CLOSED as done-by-other-means** — the linear scan is 5.78 compares per
->   lookup = 0.14% of a seed. The MRU hint, reverse scan and `DNS_ANTE_LOCAL_CACHE` cut key
->   compares 1,693x (32,593,876 -> 19,250).
-> - **Item 4 is CLOSED as a net loss.** Measured ceiling 7.5%, and the cheapest exact
->   realisation costs ~64 `__constant` lookups + ~384 int32 per draw to remove 560 int32 --
->   and NVIDIA `__constant` reads with lane-divergent addresses serialise up to 32-way.
-> - **Item 3 (wr_filter dead draws) is untouched** and still stands.
+> | stream | draws | draw % | time % | cost/draw |
+> |---|---:|---:|---:|---:|
+> | packcontents | 170 | 0.32% | 23.0% | 71x |
+> | vouchers | 115 | 0.22% | 14.1%* | 64x |
+> | packsel | 216 | 0.41% | 16.8% | 41x |
+> | rareid-resample | 807 | 1.54% | 13.1% | 8.5x |
+> | uncid-resample | 1,739 | 3.32% | 10.7% | 3.2x |
+> | cardtype | 18,624 | 35.6% | 13.6% | 0.4x |
+> | rarity / edition | 13,293 each | 25.4% each | 11.4% / 10.2% | 0.4x |
 >
-> Also closed by measurement: the software-binary64 `randomseed` (`aedde58`) is a net +7.8%
-> cost; K=2 stream interleaving (`cf7b55e`) is flat (the K=1..8 ILP probe showed no latency
-> bound, so extra ILP buys nothing); an exact prefilter is impossible (the score is monotone
-> in antes, so a prefix is a lower bound -- 54.1% false negatives at antes 3-24); seed-level
-> work redistribution has a 9.4% oracle ceiling; `--from` host I/O is a 0.2% stall.
+> \* includes a 3.8% frame-growth confound (removing vouchers removes early
+> Overstock, shrinking every shop); vouchers alone are ~10%.
 >
-> **Measurement warning.** Unpinned, this kernel's register allocation moves between 12, 14,
-> 15 and 16 resident warps on almost any source edit, worth up to ~12%. That swamped the
-> footprint sweep (1 KB and 4 KB of ballast measured identically, as did 2 KB and 8 KB) and
-> made small ablations unreadable. **Pin `-cl-nv-maxrregcount` before trusting any A/B below
-> ~12%** -- which the shipped build now does on NVIDIA by default.
+> The staged shop streams are now the CHEAPEST per draw in the filter. Packs and
+> vouchers were the last streams on the un-staged lib path.
+>
+> ## Closed by measurement
+>
+> - **No interaction cost.** Isolated stream costs sum to ~100% of the whole
+>   filter (1.605 raw, ~1.05 after subtracting five duplicated voucher spines).
+>   Single-stream optimization works; there is no hidden occupancy penalty.
+> - **Divergence is essentially solved.** forced-max/forced-mean resample depth =
+>   1.097x time for 1.22x draws, so uniform work is now *cheaper* per draw. Only
+>   ~8.8% of resample divergence remains. Uniform joker counts 1.004x and uniform
+>   frame sizes 0.970x for 4.7% fewer draws -- both nothing, which kills seed
+>   bucketing by Overstock profile.
+> - **No free scheduling wins left.** rare-before-uncommon 0.990x, split
+>   rarity/edition 1.003x, packs hoisted across antes 1.011x.
+> - **All fp64/RNG-core work is capped at 7.3%** of the pre-staging body
+>   (register-pinned). Removing the ENTIRE RNG core buys 7.3%; the Tausworthe
+>   warmup is 0.6%; `rng_advance_int` 7.2%; the exact fp64 bundle 2.9%.
+>   Earlier unpinned numbers (18.5% / 7.1% / 3.8%) were a register-allocation
+>   artifact -- see the measurement warning below.
+> - `performance_todo` items 1, 2 and 4 are all closed: item 1 shipped as
+>   `seedHashByLen`; item 2 is 0.14% of a seed; item 4 is a predicted net loss.
+>   Item 3 (wr_filter dead draws) still stands.
+> - An exact prefilter is impossible: the score is monotone in antes, so a prefix
+>   is a lower bound (54.1% false negatives at antes 3-24).
+>
+> ## Still open
+>
+> - **Vouchers, ~10%.** No easy exact win found. One voucher per ante with a
+>   strictly sequential resample chain, so there is no batch to densify and no
+>   node state to hoist (every node is ante-keyed). The cost is node creation
+>   plus divergence in a chain that cannot be reordered.
+> - **Buffoon identities, ~66 draws/seed.** Must stay per-pack: a card is
+>   temporarily locked while later cards in the SAME pack are drawn, so the
+>   identity draws are sequentially dependent on lock state.
+>
+> ## Measurement warning
+>
+> Unpinned, this kernel's register allocation moves between 12/14/15/16 resident
+> warps on almost any source edit, worth up to 12% -- larger than most effects
+> being measured. It invalidated an entire ablation run (1 KB and 4 KB of ballast
+> measured identically, as did 2 KB and 8 KB). The NVIDIA build now pins
+> registers by default. Always check the `ctl-b / ctl-a` control pair reads
+> 1.000x before believing anything else in a run.
 
 Done first (2026-09-04): the RNG path no longer builds 260-byte `text` strings
 (node names are streamed into the hash), and `i_new` became the in-place

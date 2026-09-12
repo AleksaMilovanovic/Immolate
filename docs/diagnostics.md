@@ -278,3 +278,20 @@ The 14 `diag_dns_abl_*` / `diag_dns_{maxframes,nolocks,uniform_frames,prefix*}` 
 PRE-REWRITE filter. They are marked SUPERSEDED and unwired from every profile; running them would
 measure the old implementation and return ratios that look valid. `dns_sub_*` replaces them.
 `diag_dns_baseline` is deliberately kept as the pre-rewrite regression control for the 2.076x.
+
+---
+
+## Pack-path A/B
+
+```bash
+python tests/run.py --profile diag-packs --scale rtx5080
+```
+
+`packs-phased / packs-legacy`. Both are bit-identical (verified 20,000 seeds), so any gap is
+scheduling. The phased path draws all DNS_PACKS selections off one hoisted node state, then rarity
+for every Buffoon card in the ante densely, then identities per pack (they must stay per-pack --
+lock state is sequentially dependent within a pack), then editions densely.
+
+Expect a gain on the GPU and roughly nothing on a CPU device: PoCL measured 1.010x, inside its own
+0.990x control error, exactly as the shop staging measured 1.028x slower on PoCL before coming in
+at 2.076x faster on the 5080.
