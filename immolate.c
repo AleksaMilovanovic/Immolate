@@ -239,7 +239,7 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in seed-supplier file FILE (made with --to) instead of a rank range. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in FILE instead of a rank range. FILE is either a seed-supplier file (made with --to) or a plain-text seed list: a filter's printed \"SEED (score)\" output, or one seed per line. Text lists are sorted and deduplicated, and lines that are not seeds are counted and ignored. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
             return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
@@ -856,6 +856,19 @@ build_program:
         // only) and a plain FILE, if one also exists, is ignored: it can only be
         // a leftover from another run, since a parts run never writes the base
         // name. Only when there are no parts is FILE read as a single file.
+        // A plain-text seed list -- a filter's printed output, or one seed per
+        // line -- is accepted wherever a supplier file is. Part discovery and
+        // the header checks below are meaningless for one, so it branches here.
+        int fromText = sup_is_text(fromFiles[0]);
+        if (fromText) {
+            const char* terr = sup_multi_open_text(&reader, fromFiles, numFromFiles);
+            if (terr) {
+                fprintf_s(stderr, "Cannot read seed list %s: %s.\n", fromFile, terr);
+                exit(EXIT_FAILURE);
+            }
+            printf_s("Reading %llu seeds from the text list %s.\n",
+                     (unsigned long long)reader.header.count, fromFiles[0]);
+        } else
         if (numFromFiles == 1) {
             int K = 0;
             int found = sup_discover_parts(fromFiles[0], fromFiles + 1, SUP_MAX_FILES - 1, &K);
@@ -872,12 +885,13 @@ build_program:
                 fclose(probe);
             }
         }
-        const char* rerr = sup_multi_open(&reader, fromFiles, numFromFiles);
+        const char* rerr = fromText ? NULL : sup_multi_open(&reader, fromFiles, numFromFiles);
         if (rerr) {
             fprintf_s(stderr, "Cannot read seed-supplier file %s: %s.\n", fromFile, rerr);
             exit(EXIT_FAILURE);
         }
-        if (reader.num_paths == 1) printf_s("Reading %llu seeds from %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.paths[0], reader.header.filter, (long long)reader.header.cutoff);
+        if (fromText) { /* already reported above */ }
+        else if (reader.num_paths == 1) printf_s("Reading %llu seeds from %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.paths[0], reader.header.filter, (long long)reader.header.cutoff);
         else printf_s("Reading %llu seeds from %d files, %s .. %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.num_paths, reader.paths[0], reader.paths[reader.num_paths - 1], reader.header.filter, (long long)reader.header.cutoff);
     }
     // Seed-supplier output. Opened before the search so a bad path fails fast.
