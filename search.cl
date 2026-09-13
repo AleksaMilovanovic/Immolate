@@ -63,6 +63,45 @@ __kernel void search(long start_rank, long num_seeds, long filter_cutoff) {
     }
 }
 
+// Rank-list search with one work-GROUP per seed instead of one work-item.
+//
+// The default mapping gives each seed to a single work-item, so a filter whose
+// own work is large is serial no matter how wide the device is, and the batch
+// waits for the slowest seed on one thread. That is the binding constraint for
+// tree-searching filters: a seed worth 59,049 leaf walks takes as long as one
+// thread needs, and a consumer GPU thread running fp64 at 1/64 rate is slower
+// at it than a CPU core.
+//
+// Here every lane of the group gets the same seed and the filter splits its own
+// work across the group, reading get_local_id/get_local_size itself and
+// returning that lane's best. The group maximum is reduced and printed once.
+// Selected with --group_per_seed, which also defines GROUP_PER_SEED so the
+// filter knows to split; a filter built without it would have every lane
+// duplicate the whole search, which is correct but pointless.
+//
+// The reduction is a serial scan by lane 0 rather than a tree: it runs once per
+// seed over at most a few hundred lanes, which is nothing beside the search,
+// and it is correct for any work-group size rather than powers of two only.
+__kernel void search_ranks_grouped(__global const long* ranks, long num_ranks,
+                                   long filter_cutoff, __local long* scratch) {
+    const uint lid = get_local_id(0);
+    const uint lsz = get_local_size(0);
+    // Every lane of a group shares group_id, so all of them make the same
+    // number of trips and every barrier below is reached by the whole group.
+    for (long g = (long)get_group_id(0); g < num_ranks; g += (long)get_num_groups(0)) {
+        seed _seed = s_from_rank(ranks[g]);
+        instance inst;
+        i_init(&inst, _seed);
+        scratch[lid] = RUN_FILTER(&inst);
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (lid == 0) {
+            for (uint i = 1; i < lsz; i++) if (scratch[i] > scratch[0]) scratch[0] = scratch[i];
+            if (scratch[0] >= filter_cutoff) s_print_score(&_seed, scratch[0]);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+}
+
 // Rank-list search: the same as `search`, but the seeds come from a packed
 // list of ranks (a two-pass prefilter's survivors, or a supplier file given
 // with --from) instead of a contiguous range.

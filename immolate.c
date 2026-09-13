@@ -69,7 +69,7 @@ static int cli_is_known_option(const char* text) {
     static const char* options[] = {
         "-h", "-f", "-s", "-n", "-c", "-p", "-d", "-g", "-l", "--build_opts",
         "--list_devices", "--no_cache", "--verbose_build", "--single_pass",
-        "--batch", "--progress", "--to", "--scores_to", "--from",
+        "--batch", "--progress", "--to", "--scores_to", "--from", "--group_per_seed",
         "--to_parts", "--resume"
     };
     for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
@@ -211,6 +211,7 @@ int main(int argc, char **argv) {
     // both exist so a launch-configuration sweep needs no rebuild per point.
     unsigned int forcedLocal = 0;
     const char* extraBuildOpts = NULL;
+    int groupPerSeed = 0;  // --group_per_seed: one work-group per seed
     int noCache = 0;
     int verboseBuild = 0;
     int singlePass = 0;
@@ -239,7 +240,7 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in FILE instead of a rank range. FILE is either a seed-supplier file (made with --to) or a plain-text seed list: a filter's printed \"SEED (score)\" output, or one seed per line. Text lists are sorted and deduplicated, and lines that are not seeds are counted and ignored. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in FILE instead of a rank range. FILE is either a seed-supplier file (made with --to) or a plain-text seed list: a filter's printed \"SEED (score)\" output, or one seed per line. Text lists are sorted and deduplicated, and lines that are not seeds are counted and ignored. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--group_per_seed  Give each seed a whole work-group instead of one work-item, and define GROUP_PER_SEED for the filter, so a filter that splits its own work across get_local_id can use every lane on one seed. Only affects the --from print path. Use it when a filter's per-seed cost is large and uneven; it does nothing for cheap filters.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
             return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
@@ -266,6 +267,12 @@ int main(int argc, char **argv) {
             if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             forcedLocal = atoi(argv[i+1]);
             i++;
+        }
+        if (strcmp(argv[i],  "--group_per_seed")==0) {
+            // Hand each seed to a whole work-group so a filter can split its
+            // own search across the lanes. Only the --from print path uses it;
+            // see search_ranks_grouped.
+            groupPerSeed = 1;
         }
         if (strcmp(argv[i],  "--build_opts")==0) { // DIAGNOSTIC: extra clBuildProgram options
             if (i + 1 >= argc) { fprintf_s(stderr, "--build_opts requires a value.\n"); return EXIT_FAILURE; }
@@ -550,6 +557,7 @@ int main(int argc, char **argv) {
     strcpy_s(include_path, sizeof include_path, "-I \"");
     strcat_s(include_path, sizeof include_path, executable_dir);
     strcat_s(include_path, sizeof include_path, "\"");
+    if (groupPerSeed) strcat_s(include_path, sizeof include_path, " -D GROUP_PER_SEED");
     if (extraBuildOpts) { // DIAGNOSTIC
         strcat_s(include_path, sizeof include_path, " ");
         strcat_s(include_path, sizeof include_path, extraBuildOpts);
@@ -792,6 +800,11 @@ build_program:
     clErrCheck(err, "clCreateKernel - Creating search_collect kernel");
     cl_kernel ranksCollectKernel = clCreateKernel(ssKernelProgram, "search_ranks_collect", &err);
     clErrCheck(err, "clCreateKernel - Creating search_ranks_collect kernel");
+    cl_kernel ranksGroupedKernel = NULL;
+    if (groupPerSeed) {
+        ranksGroupedKernel = clCreateKernel(ssKernelProgram, "search_ranks_grouped", &err);
+        clErrCheck(err, "clCreateKernel - Creating search_ranks_grouped kernel");
+    }
     cl_kernel scoresKernel = NULL;
     if (scoresToFile) {
         scoresKernel = clCreateKernel(ssKernelProgram, "search_scores", &err);
@@ -815,6 +828,10 @@ build_program:
     clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
     err = clSetKernelArg(collectKernel, 2, sizeof(cutoff), &cutoff);
     clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
+    if (ranksGroupedKernel) {
+        err = clSetKernelArg(ranksGroupedKernel, 2, sizeof(cutoff), &cutoff);
+        clErrCheck(err, "clSetKernelArg - Adding cutoff to grouped kernel");
+    }
     err = clSetKernelArg(ranksCollectKernel, 2, sizeof(cutoff), &cutoff);
     clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
 
@@ -847,6 +864,11 @@ build_program:
     }
     size_t globalSize = (size_t)numGroups * localSize;
     printf_s("Launching %zu work-groups of %zu work-items (%zu total).\n", (size_t)numGroups, localSize, globalSize);
+    if (ranksGroupedKernel) {
+        err = clSetKernelArg(ranksGroupedKernel, 3, sizeof(cl_long) * localSize, NULL);
+        clErrCheck(err, "clSetKernelArg - Adding grouped reduction scratch");
+        printf_s("One work-group per seed: each seed's search is split across %zu lanes.\n", localSize);
+    }
 
     // Seed-supplier input.
     sup_multi reader;
@@ -1081,6 +1103,10 @@ build_program:
         // List kernels read listBuf; the collecting one writes hits to outBuf.
         err = clSetKernelArg(ranksKernel, 0, sizeof(cl_mem), &listBuf);
         clErrCheck(err, "clSetKernelArg - Adding ranks buffer argument");
+        if (ranksGroupedKernel) {
+            err = clSetKernelArg(ranksGroupedKernel, 0, sizeof(cl_mem), &listBuf);
+            clErrCheck(err, "clSetKernelArg - Adding ranks buffer to grouped kernel");
+        }
         err = clSetKernelArg(ranksCollectKernel, 0, sizeof(cl_mem), &listBuf);
         clErrCheck(err, "clSetKernelArg - Adding ranks buffer argument");
         if (outBuf) {
@@ -1143,7 +1169,8 @@ build_program:
             cl_uint hits = 0;
             if (haveList) {
                 if (thisBatch > 0) {
-                    cl_kernel k = toFile ? ranksCollectKernel : ranksKernel;
+                    cl_kernel k = toFile ? ranksCollectKernel
+                                        : (ranksGroupedKernel ? ranksGroupedKernel : ranksKernel);
                     err = clSetKernelArg(k, 1, sizeof(thisBatch), &thisBatch);
                     clErrCheck(err, "clSetKernelArg - Adding number of ranks");
                     if (toFile) {
@@ -1151,7 +1178,11 @@ build_program:
                         clErrCheck(err, "clEnqueueWriteBuffer - Resetting hit count");
                     }
                     // The list is short compared with a batch; do not launch more lanes than there is work.
-                    size_t listGroups = ((size_t)thisBatch + localSize - 1) / localSize;
+                    // One group per seed under --group_per_seed; otherwise one
+                    // work-item per seed as before.
+                    size_t listGroups = ranksGroupedKernel
+                        ? (size_t)thisBatch
+                        : ((size_t)thisBatch + localSize - 1) / localSize;
                     if (listGroups > (size_t)numGroups) listGroups = numGroups;
                     size_t listGlobal = listGroups * localSize;
                     // Via enqueue_1d, not a bare clEnqueueNDRangeKernel: this is
@@ -1246,6 +1277,7 @@ build_program:
     clReleaseKernel(ranksKernel);
     clReleaseKernel(collectKernel);
     clReleaseKernel(ranksCollectKernel);
+    if (ranksGroupedKernel) clReleaseKernel(ranksGroupedKernel);
     err = clReleaseKernel(ssKernel);
     err = clReleaseProgram(ssKernelProgram);
     err = clReleaseCommandQueue(queue);
