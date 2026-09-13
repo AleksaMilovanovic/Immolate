@@ -536,6 +536,67 @@ static int sup_is_text(const char* path) {
     return memcmp(buf, SUP_MAGIC, 8) != 0;
 }
 
+// Reads a whole file. Caller frees. Returns NULL and leaves *n untouched on
+// failure.
+static unsigned char* sup_slurp(const char* path, size_t* n) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return NULL; }
+    rewind(f);
+    unsigned char* buf = (unsigned char*)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+    *n = got;
+    return buf;
+}
+
+// Normalises a text file's bytes to plain ASCII in place, returning the new
+// length and advancing *start past any byte-order mark.
+//
+// This exists because of how people actually produce these files. Redirecting a
+// run with `>` in Windows PowerShell 5 writes UTF-16LE, and in PowerShell 7 it
+// writes UTF-8 with a BOM. Neither is exotic and both break naive line parsing:
+// the BOM glues itself to the first seed so that line is rejected, and UTF-16
+// puts a NUL after every character, which ends a C string after one byte -- the
+// file then looks like a single one-character seed and gets searched as one,
+// silently, which is far worse than failing. Seeds are ASCII, so the fix is to
+// recognise the encoding and flatten it before parsing.
+static size_t sup_normalise_text(unsigned char* buf, size_t n, size_t* start) {
+    *start = 0;
+    if (n >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) { *start = 3; return n; }
+
+    int utf16le = 0, utf16be = 0;
+    size_t from = 0;
+    if (n >= 2 && buf[0] == 0xFF && buf[1] == 0xFE) { utf16le = 1; from = 2; }
+    else if (n >= 2 && buf[0] == 0xFE && buf[1] == 0xFF) { utf16be = 1; from = 2; }
+    else if (n >= 4) {
+        // No BOM: infer from where the NUL bytes fall in the first stretch.
+        size_t look = n < 256 ? n : 256;
+        look &= ~(size_t)1;
+        size_t odd = 0, even = 0;
+        for (size_t i = 0; i < look; i += 2) {
+            if (buf[i] == 0) even++;
+            if (buf[i + 1] == 0) odd++;
+        }
+        size_t pairs = look / 2;
+        if (pairs >= 2 && odd == pairs && even == 0) utf16le = 1;
+        else if (pairs >= 2 && even == pairs && odd == 0) utf16be = 1;
+    }
+    if (!utf16le && !utf16be) return n;
+
+    size_t out = 0;
+    for (size_t i = from; i + 1 < n; i += 2) {
+        unsigned char lo = utf16le ? buf[i] : buf[i + 1];
+        unsigned char hi = utf16le ? buf[i + 1] : buf[i];
+        buf[out++] = (hi == 0 && lo < 0x80) ? lo : (unsigned char)'?';
+    }
+    return out;
+}
+
 // Reads seeds from one or more text files into memory, sorted and deduplicated
 // (the kernel path wants ascending ranks, and a pool pasted together from
 // several runs usually repeats some). Returns NULL on success.
@@ -548,30 +609,58 @@ static const char* sup_multi_open_text(sup_multi* m, char** paths, int num) {
     if (!ranks) { free(m->paths); return "out of memory"; }
     uint64_t skipped = 0;
     int kept = 0;
+    char sample[3][80];
+    int samples = 0;
+
     for (int i = 0; i < num; i++) {
-        FILE* f = fopen(paths[i], "rb");
-        if (!f) { fprintf(stderr, "Skipping %s: cannot open file.\n", paths[i]); continue; }
+        size_t raw = 0;
+        unsigned char* buf = sup_slurp(paths[i], &raw);
+        if (!buf) { fprintf(stderr, "Skipping %s: cannot read file.\n", paths[i]); continue; }
         m->paths[kept++] = paths[i];
-        char line[512];
-        while (fgets(line, sizeof line, f)) {
-            size_t len = strlen(line);
-            while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) len--;
-            if (len == 0) continue;
-            int64_t rank = sup_parse_seed_line(line, line + len);
-            if (rank < 0) { skipped++; continue; }
-            if (n == cap) {
-                size_t grown = cap * 2;
-                int64_t* bigger = (int64_t*)realloc(ranks, sizeof(int64_t) * grown);
-                if (!bigger) { free(ranks); fclose(f); return "out of memory"; }
-                ranks = bigger;
-                cap = grown;
+        size_t start = 0;
+        size_t len = sup_normalise_text(buf, raw, &start);
+        const char* p = (const char*)buf + start;
+        const char* fileEnd = (const char*)buf + len;
+        while (p < fileEnd) {
+            const char* eol = p;
+            while (eol < fileEnd && *eol != '\n') eol++;
+            int64_t rank = sup_parse_seed_line(p, eol);
+            if (rank >= 0) {
+                if (n == cap) {
+                    size_t grown = cap * 2;
+                    int64_t* bigger = (int64_t*)realloc(ranks, sizeof(int64_t) * grown);
+                    if (!bigger) { free(ranks); free(buf); return "out of memory"; }
+                    ranks = bigger;
+                    cap = grown;
+                }
+                ranks[n++] = rank;
+            } else {
+                // Keep the first few rejects: if nothing parses, showing the
+                // caller what the lines actually looked like beats a bare count.
+                const char* t = p;
+                while (t < eol && (*t == ' ' || *t == '\t' || *t == '\r')) t++;
+                if (t < eol && *t != '#' && samples < 3) {
+                    size_t take = (size_t)(eol - t);
+                    if (take > sizeof sample[0] - 1) take = sizeof sample[0] - 1;
+                    memcpy(sample[samples], t, take);
+                    sample[samples][take] = '\0';
+                    for (size_t k = 0; k < take; k++)
+                        if ((unsigned char)sample[samples][k] < 0x20) sample[samples][k] = '?';
+                    samples++;
+                }
+                skipped++;
             }
-            ranks[n++] = rank;
+            p = (eol < fileEnd) ? eol + 1 : fileEnd;
         }
-        fclose(f);
+        free(buf);
     }
     if (kept == 0) { free(ranks); return "no readable seed list files"; }
-    if (n == 0) { free(ranks); return "no seeds found (expected lines of \"SEED\" or \"SEED (score)\")"; }
+    if (n == 0) {
+        free(ranks);
+        for (int i = 0; i < samples; i++)
+            fprintf(stderr, "  line %d was: \"%s\"\n", i + 1, sample[i]);
+        return "no seeds found (expected lines of \"SEED\" or \"SEED (score)\")";
+    }
     qsort(ranks, n, sizeof(int64_t), sup_cmp_long);
     size_t uniq = 1;
     for (size_t i = 1; i < n; i++) if (ranks[i] != ranks[uniq - 1]) ranks[uniq++] = ranks[i];
@@ -582,7 +671,6 @@ static const char* sup_multi_open_text(sup_multi* m, char** paths, int num) {
     m->mem_count = (uint64_t)uniq;
     m->mem_pos = 0;
     m->cur = -1;
-    // A text list carries no provenance, so the aggregate header is synthetic.
     memset(&m->header, 0, sizeof m->header);
     snprintf(m->header.filter, sizeof m->header.filter, "%s", "(text list)");
     m->header.count = (uint64_t)uniq;
