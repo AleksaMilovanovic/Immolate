@@ -208,6 +208,120 @@ inline double ann_random(instance* inst, double* state, lrandom* scratch) {
     return l_random(scratch);
 }
 
+// ---------------------------------------------------------------------------
+// Identity draws that do not grow the node cache.
+//
+// randchoice_common puts every resample depth on its own rng node, and
+// rng_node_resolve finds a node by LINEAR SCAN over all live nodes -- so a chain
+// reaching depth D costs O(D^2) and leaves D nodes behind it. As the cola engine
+// draws the Uncommon pool down, D runs into the hundreds, and that is both the
+// node-cache overflow and most of the runtime. Worse, once the cache overflows
+// nextFreeNode sticks at CACHE_SIZE and EVERY later lookup scans the whole
+// array, so a bigger cache makes the collapse slower, not rarer.
+//
+// A resample node never has to outlive the depth it belongs to. Drawing a pool
+// DEPTH-MAJOR -- every ordinal at depth 1, then every ordinal at depth 2 --
+// consumes each depth's node exactly once, in ordinal order, which is the same
+// sequence the node sees in the game. So the node can be taken, used and handed
+// straight back, and the cache stays at a handful of entries where every lookup
+// hits the lastNode fast path.
+//
+// Exactness rests on the same argument the deep_negative_shops staging uses:
+// each rng node is an independent stream keyed by its own name, so only the
+// order of draws WITHIN a node can matter, and that order is unchanged.
+// ---------------------------------------------------------------------------
+#define ANN_MASK_WORDS ((ANN_MAX_CARDS + 63) / 64)
+typedef struct AnnMask { ulong w[ANN_MASK_WORDS]; } ann_mask;
+inline void annm_clear(ann_mask* m) { for (int i = 0; i < ANN_MASK_WORDS; i++) m->w[i] = 0UL; }
+inline void annm_set(ann_mask* m, int o) { m->w[o >> 6] |= 1UL << (o & 63); }
+inline bool annm_any(const ann_mask* m) {
+    ulong any = 0UL;
+    for (int i = 0; i < ANN_MASK_WORDS; i++) any |= m->w[i];
+    return any != 0UL;
+}
+
+// Take a node's state and give the slot straight back. Resolving the same node
+// later recomputes the identical initial state from the seed, which is exactly
+// what a refinement re-pass wants: the stream restarts from the beginning.
+inline double ann_take_node(instance* inst, ntype nts[], int ids[], int num) {
+    int before = inst->rngCache.nextFreeNode;
+    rng_node_id nd = rng_node_resolve(inst, nts, ids, num);
+    double st = inst->rngCache.nodes[nd].rngState;
+    if (nd == before && inst->rngCache.nextFreeNode == before + 1) {
+        inst->rngCache.nextFreeNode = before;   // freshly appended; hand it back
+        inst->rngCache.lastNode = -1;
+    }
+    return st;
+}
+
+// A joker kept at a given ordinal. It leaves the pool for every LATER ordinal
+// and no earlier one, so a pass has to switch each lock on as it sweeps past
+// that ordinal rather than holding them all from the start.
+typedef struct AnnKeep { short ord; short id; } ann_keep;
+
+inline void ann_keeps_off(instance* inst, const ann_keep* keeps, int n) {
+    for (int i = 0; i < n; i++) i_unlock(inst, (item)keeps[i].id);
+}
+inline void ann_keeps_on(instance* inst, const ann_keep* keeps, int n) {
+    for (int i = 0; i < n; i++) i_lock(inst, (item)keeps[i].id);
+}
+
+// One depth-major pass over `n` ordinals of a single pool, writing each
+// ordinal's resolved item to out[]. `keeps` must be sorted by ordinal; each one
+// is locked as the sweep passes its ordinal, so a keep discovered at ordinal k
+// affects ordinals after k and leaves everything before k alone -- which is what
+// makes lock-as-soon-as-seen exact rather than approximate.
+void ann_flush_pool(instance* inst, rtype rngType, rsrc src, int ante,
+                    __constant item items[], int n, short* out,
+                    const ann_keep* keeps, int keepCount) {
+    if (n <= 0) return;
+    int itemCount = (int)items[0];
+    lrandom rng = inst->rng;
+    ann_mask pending;
+    annm_clear(&pending);
+
+    double st = ann_take_node(inst,
+        (__private ntype[]){N_Type, N_Source, N_Ante},
+        (__private int[]){rngType, src, ante}, 3);
+    ann_keeps_off(inst, keeps, keepCount);
+    int kp = 0;
+    for (int o = 0; o < n; o++) {
+        while (kp < keepCount && keeps[kp].ord < o) { i_lock(inst, (item)keeps[kp].id); kp++; }
+        rng = randomseed(ann_advance(inst, &st));
+        item it = items[l_randint(&rng, 1, itemCount)];
+        out[o] = (short)it;
+        if (!inst->params.showman && i_locked(inst, it)) annm_set(&pending, o);
+    }
+
+    for (int depth = 1; annm_any(&pending); depth++) {
+        double rs = ann_take_node(inst,
+            (__private ntype[]){N_Type, N_Source, N_Ante, N_Resample},
+            (__private int[]){rngType, src, ante, depth}, 4);
+        ann_keeps_off(inst, keeps, keepCount);
+        kp = 0;
+        ann_mask next;
+        annm_clear(&next);
+        // Set bits in increasing ordinal order: low word first, low bit first.
+        for (int word = 0; word < ANN_MASK_WORDS; word++) {
+            ulong m = pending.w[word];
+            int off = word * 64;
+            while (m != 0UL) {
+                ulong low = m & (~m + 1UL);
+                int o = off + (int)(63UL - clz(low));
+                m ^= low;
+                while (kp < keepCount && keeps[kp].ord < o) { i_lock(inst, (item)keeps[kp].id); kp++; }
+                rng = randomseed(ann_advance(inst, &rs));
+                item it = items[l_randint(&rng, 1, itemCount)];
+                out[o] = (short)it;
+                if (i_locked(inst, it)) annm_set(&next, o);
+            }
+        }
+        pending = next;
+    }
+    ann_keeps_on(inst, keeps, keepCount);
+    inst->rng = rng;
+}
+
 #define ANN_R_COMMON   0
 #define ANN_R_UNCOMMON 1
 #define ANN_R_RARE     2
@@ -274,8 +388,27 @@ typedef struct AnnAnte {
     short ident[ANN_MAX_CARDS];
     short elig[ANN_MAX_CARDS];      // per joker slot: eligible-target ordinal, or -1
     short eligSlot[ANN_MAX_CARDS];  // per eligible ordinal: the joker slot
+    short poolSlot[ANN_MAX_CARDS];  // scratch: pool ordinal -> joker slot
+    short poolOut[ANN_MAX_CARDS];   // scratch: pool ordinal -> drawn item
     int eligCount;
 } ann_ante;
+
+// A Negative Tag window: `width` consecutive eligible shop jokers starting at
+// eligible-target ordinal `start`, all of which must sit before `limitCards`.
+typedef struct AnnWin { int start, width, limitCards; } ann_win;
+
+// At most one keep per Uncommon in the pool, and a kept one never comes back.
+#define ANN_MAX_KEEPS 80
+
+// Is this shop joker inside a Negative Tag window? elig is -1 for a joker that
+// already has an edition, and window starts are never negative, so those never
+// match.
+inline bool ann_is_target(const ann_ante* a, int slot, const ann_win* wins, int nwins) {
+    for (int w = 0; w < nwins; w++)
+        if (a->elig[slot] >= wins[w].start && a->elig[slot] < wins[w].start + wins[w].width)
+            return true;
+    return false;
+}
 
 // Points a single joker is worth once it is Negative.
 inline int ann_value(item joker, bool* isCopy) {
@@ -311,10 +444,6 @@ typedef struct AnnLog {
     int lastCopyCard, frameSize;
     short items[ANN_LOG_ITEMS];
 } ann_log;
-
-// A Negative Tag window: `width` consecutive eligible shop jokers starting at
-// eligible-target ordinal `start`, all of which must sit before `limitCards`.
-typedef struct AnnWin { int start, width, limitCards; } ann_win;
 
 // ---------------------------------------------------------------------------
 // One ante. Called twice per branch that spends a tag: once with no window, to
@@ -431,35 +560,85 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     inst->rngCache.nodes[edNode].rngState = edState;
     a->eligCount = eligCount;
 
+    // ---- identities, pool by pool ----
+    // Nothing below consumes a cache node: each pool is drawn depth-major and
+    // every node is handed back (see ann_flush_pool).
+    int n;
+
+    n = 0;
+    for (int j = 0; j < jc; j++) if (a->rar[j] == ANN_R_RARE) a->poolSlot[n++] = (short)j;
+    ann_flush_pool(inst, R_Joker_Rare, S_Shop, ante, RARE_JOKERS, n, a->poolOut,
+                   (const ann_keep*)0, 0);
+    for (int o = 0; o < n; o++) a->ident[a->poolSlot[o]] = a->poolOut[o];
+
 #ifdef ANN_SCORE_COMMONS
     // The Common identity node and its resample chain are read by nothing else
     // and are discarded at the ante boundary, so the stream can stop after the
     // last Common whose identity can still change the score. Exact.
-    int lastCommon = -1;
+    n = 0;
+    int lastCommon = 0;
     for (int j = 0; j < jc; j++) {
         if (a->rar[j] != ANN_R_COMMON) continue;
-        bool target = false;
-        for (int w = 0; w < nwins && !target; w++)
-            target = a->elig[j] >= wins[w].start && a->elig[j] < wins[w].start + wins[w].width;
-        if ((a->ed[j] & ANN_ED_NEGATIVE) || target) lastCommon = j;
+        a->poolSlot[n++] = (short)j;
+        if ((a->ed[j] & ANN_ED_NEGATIVE) || ann_is_target(a, j, wins, nwins)) lastCommon = n;
     }
+    ann_flush_pool(inst, R_Joker_Common, S_Shop, ante, COMMON_JOKERS, lastCommon, a->poolOut,
+                   (const ann_keep*)0, 0);
+    for (int o = 0; o < lastCommon; o++) a->ident[a->poolSlot[o]] = a->poolOut[o];
 #endif
 
+    // Uncommons, with lock-as-soon-as-seen. A kept Uncommon leaves the pool for
+    // every later ordinal, which shifts their draws, so the pass is redone from
+    // the first ordinal that keeps one. Each pass finalises one more prefix, so
+    // this converges in (keeps + 1) passes -- and because ann_flush_pool
+    // switches each keep on only as it sweeps past that ordinal, the ordinals
+    // before it are redrawn exactly as they were.
+    ann_keep keeps[ANN_MAX_KEEPS];
+    int keepCount = 0;
+    n = 0;
+    for (int j = 0; j < jc; j++) if (a->rar[j] == ANN_R_UNCOMMON) a->poolSlot[n++] = (short)j;
+    int finalized = 0;
+    while (true) {
+        ann_flush_pool(inst, R_Joker_Uncommon, S_Shop, ante, UNCOMMON_JOKERS, n, a->poolOut,
+                       keeps, keepCount);
+        // Accept as many keeps from this pass as stay trustworthy. Locking an
+        // item only perturbs a later ordinal if that ordinal DREW it: a chain
+        // terminates on the first unlocked item it hits, so an item that was
+        // unlocked during this pass can only appear as a final identity, never
+        // as a link in someone else's chain. So the pass stays valid right up
+        // to the first ordinal that drew something we just locked -- that one
+        // would now resample, which shifts every draw after it too.
+        short newly[ANN_MAX_KEEPS];
+        int added = 0;
+        int o = finalized;
+        for (; o < n; o++) {
+            item id = (item)a->poolOut[o];
+            bool perturbed = false;
+            for (int i = 0; i < added; i++) if (newly[i] == (short)id) { perturbed = true; break; }
+            if (perturbed) break;   // trust horizon
+            if (id == Diet_Cola) continue;   // always sold, so never kept
+            int slot = a->poolSlot[o];
+            if (!((a->ed[slot] & ANN_ED_NEGATIVE) || ann_is_target(a, slot, wins, nwins))) continue;
+            if (c->uncAvail <= ANN_LOCK_FLOOR || keepCount >= ANN_MAX_KEEPS) { o = n; break; }
+            keeps[keepCount].ord = (short)o;
+            keeps[keepCount].id = (short)id;
+            keepCount++;
+            i_lock(inst, id);
+            c->uncAvail--;
+            newly[added++] = (short)id;
+        }
+        finalized = o;
+        // Ran the whole pool without hitting the horizon: every identity in
+        // this pass is final, whatever was locked along the way.
+        if (o >= n) break;
+    }
+    for (int o = 0; o < n; o++) a->ident[a->poolSlot[o]] = a->poolOut[o];
+
+    // ---- score, in queue order ----
     for (int j = 0; j < jc; j++) {
-        int r = a->rar[j];
-        item id = (item)0;
-        if (r == ANN_R_RARE)          id = randchoice_common(inst, R_Joker_Rare, S_Shop, ante, RARE_JOKERS);
-        else if (r == ANN_R_UNCOMMON) id = randchoice_common(inst, R_Joker_Uncommon, S_Shop, ante, UNCOMMON_JOKERS);
-#ifdef ANN_SCORE_COMMONS
-        else if (j <= lastCommon)     id = randchoice_common(inst, R_Joker_Common, S_Shop, ante, COMMON_JOKERS);
-#endif
-        a->ident[j] = (short)id;
-
-        if (id == Diet_Cola) { c->colas++; continue; }  // sold on sight, never locked
-
-        bool target = false;
-        for (int w = 0; w < nwins && !target; w++)
-            target = a->elig[j] >= wins[w].start && a->elig[j] < wins[w].start + wins[w].width;
+        item id = (item)a->ident[j];
+        if (id == Diet_Cola) { c->colas++; continue; }   // sold on sight
+        bool target = ann_is_target(a, j, wins, nwins);
         if (!(a->ed[j] & ANN_ED_NEGATIVE) && !target) continue;
 
         bool isCopy;
@@ -471,9 +650,6 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             // joker the window takes.
             if (isCopy) log->lastCopyCard = a->cardIdx[j];
         }
-        // Negative Uncommons are kept -- they cost no slot -- so they leave the
-        // pool immediately, which is what raises Diet Cola's share of it.
-        if (r == ANN_R_UNCOMMON) ann_keep_uncommon(inst, c, id);
     }
 #ifdef ANN_NODE_PEAK
     if (inst->rngCache.nextFreeNode > c->nodePeak) c->nodePeak = inst->rngCache.nextFreeNode;
@@ -771,6 +947,12 @@ long filter(instance* inst) {
         }
     }
     if (M > ANN_MAX_BRANCH_POINTS) return ANN_OVER_BUDGET + (long)M;
+#ifdef ANN_BRANCH_POINTS
+    // Diagnostic: stop after the tag pre-pass and report how many branch points
+    // the seed offers. Cost of a seed is exponential in this, so it is the one
+    // number that predicts how long a pool will take.
+    return (long)M;
+#endif
 
     shop sh = get_shop_instance(inst);
     double totalRate = get_total_rate(sh);
