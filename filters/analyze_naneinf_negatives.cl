@@ -208,6 +208,23 @@ inline double ann_random(instance* inst, double* state, lrandom* scratch) {
     return l_random(scratch);
 }
 
+// Running totals that a branch carries across antes.
+typedef struct AnnCtx {
+#ifdef ANN_PROFILE
+    // Counters, not branch state: they survive a restore like nodePeak so a
+    // whole seed's totals accumulate across the tree.
+    long draws, depths, passes, antes;
+#endif
+#ifdef ANN_NODE_PEAK
+    int nodePeak;   // measurement only; deliberately survives a branch restore
+#endif
+    int colas;
+    int copies, fives, ones;
+    int pendingWidth;   // a T2 tag taken last ante fires this ante at this width
+    int uncAvail;       // Uncommons still in the pool, for ANN_LOCK_FLOOR
+    bool overstock, overstockPlus;
+} ann_ctx;
+
 // ---------------------------------------------------------------------------
 // Identity draws that do not grow the node cache.
 //
@@ -234,10 +251,51 @@ inline double ann_random(instance* inst, double* state, lrandom* scratch) {
 typedef struct AnnMask { ulong w[ANN_MASK_WORDS]; } ann_mask;
 inline void annm_clear(ann_mask* m) { for (int i = 0; i < ANN_MASK_WORDS; i++) m->w[i] = 0UL; }
 inline void annm_set(ann_mask* m, int o) { m->w[o >> 6] |= 1UL << (o & 63); }
+inline bool annm_get(const ann_mask* m, int o) { return ((m->w[o >> 6] >> (o & 63)) & 1UL) != 0UL; }
 inline bool annm_any(const ann_mask* m) {
     ulong any = 0UL;
     for (int i = 0; i < ANN_MASK_WORDS; i++) any |= m->w[i];
     return any != 0UL;
+}
+
+// How many of a pool's items are still unlocked. A pool with none left cannot
+// be drawn from at all: the resample loop -- the game's and ours -- looks for an
+// unlocked item and never finds one.
+inline int ann_pool_open(instance* inst, __constant item items[]) {
+    int n = 0;
+    for (int i = 1; i <= (int)items[0]; i++) if (!i_locked(inst, items[i])) n++;
+    return n;
+}
+
+// What a draw yields when its pool has nothing unlocked left. The plain Joker
+// is Common, scores nothing, and is never a pool this filter locks, so it
+// cannot feed back into the engine.
+#define ANN_POOL_EMPTY Joker
+
+// randchoice_common that cannot spin.
+//
+// The cola engine keeps every negative Uncommon, so the Uncommon pool drains to
+// the one item that is never kept -- Diet Cola, which is always sold. A Buffoon
+// pack then locks each joker it draws so the pack cannot show the same one
+// twice, and if it draws that last Diet Cola the pool is EMPTY: a later
+// Uncommon card in the same pack enters the resample loop looking for an
+// unlocked item that no longer exists, and never leaves. The game cannot reach
+// this (you cannot own 43 Uncommons), so there is no right answer to copy --
+// only a deterministic one. The base draw is still consumed, exactly as it
+// would be; only the resamples that could never terminate are skipped.
+item ann_choice_guarded(instance* inst, rtype rngType, rsrc src, int ante, __constant item items[]) {
+    item i = randchoice(inst, (__private ntype[]){N_Type, N_Source, N_Ante},
+                        (__private int[]){rngType, src, ante}, 3, items);
+    if (!inst->params.showman && i_locked(inst, i)) {
+        if (ann_pool_open(inst, items) == 0) return ANN_POOL_EMPTY;
+        int resampleNum = 1;
+        while (i_locked(inst, i)) {
+            i = randchoice(inst, (__private ntype[]){N_Type, N_Source, N_Ante, N_Resample},
+                           (__private int[]){rngType, src, ante, resampleNum}, 4, items);
+            resampleNum++;
+        }
+    }
+    return i;
 }
 
 // Take a node's state and give the slot straight back. Resolving the same node
@@ -271,7 +329,7 @@ inline void ann_keeps_on(instance* inst, const ann_keep* keeps, int n) {
 // is locked as the sweep passes its ordinal, so a keep discovered at ordinal k
 // affects ordinals after k and leaves everything before k alone -- which is what
 // makes lock-as-soon-as-seen exact rather than approximate.
-void ann_flush_pool(instance* inst, rtype rngType, rsrc src, int ante,
+void ann_flush_pool(instance* inst, ann_ctx* c, rtype rngType, rsrc src, int ante,
                     __constant item items[], int n, short* out,
                     const ann_keep* keeps, int keepCount) {
     if (n <= 0) return;
@@ -290,10 +348,27 @@ void ann_flush_pool(instance* inst, rtype rngType, rsrc src, int ante,
         rng = randomseed(ann_advance(inst, &st));
         item it = items[l_randint(&rng, 1, itemCount)];
         out[o] = (short)it;
+#ifdef ANN_PROFILE
+        c->draws++;
+#endif
         if (!inst->params.showman && i_locked(inst, it)) annm_set(&pending, o);
     }
 
+    // Nothing unlocked means no resample can ever terminate. Checked with every
+    // keep applied, which is the most-locked the sweep below ever gets, so one
+    // check covers the whole loop. The shop takes no temporary locks, so unlike
+    // the packs this should never fire; it is here so an exhausted pool can
+    // never become a hang.
+    if (ann_pool_open(inst, items) == 0) {
+        for (int o = 0; o < n; o++) if (annm_get(&pending, o)) out[o] = (short)ANN_POOL_EMPTY;
+        ann_keeps_on(inst, keeps, keepCount);
+        inst->rng = rng;
+        return;
+    }
     for (int depth = 1; annm_any(&pending); depth++) {
+#ifdef ANN_PROFILE
+        c->depths++;
+#endif
         double rs = ann_take_node(inst,
             (__private ntype[]){N_Type, N_Source, N_Ante, N_Resample},
             (__private int[]){rngType, src, ante, depth}, 4);
@@ -313,6 +388,9 @@ void ann_flush_pool(instance* inst, rtype rngType, rsrc src, int ante,
                 rng = randomseed(ann_advance(inst, &rs));
                 item it = items[l_randint(&rng, 1, itemCount)];
                 out[o] = (short)it;
+#ifdef ANN_PROFILE
+                c->draws++;
+#endif
                 if (i_locked(inst, it)) annm_set(&next, o);
             }
         }
@@ -333,18 +411,6 @@ void ann_flush_pool(instance* inst, rtype rngType, rsrc src, int ante,
 #define ANN_T1_COPY 1
 #define ANN_T1_UNC  2
 #define ANN_T2      3
-
-// Running totals that a branch carries across antes.
-typedef struct AnnCtx {
-#ifdef ANN_NODE_PEAK
-    int nodePeak;   // measurement only; deliberately survives a branch restore
-#endif
-    int colas;
-    int copies, fives, ones;
-    int pendingWidth;   // a T2 tag taken last ante fires this ante at this width
-    int uncAvail;       // Uncommons still in the pool, for ANN_LOCK_FLOOR
-    bool overstock, overstockPlus;
-} ann_ctx;
 
 inline long ann_score(const ann_ctx* c) {
     return (long)c->copies * ANN_W_COPY + (long)c->fives * ANN_W_FIVE + (long)c->ones * ANN_W_ONE;
@@ -370,9 +436,15 @@ inline void ann_restore(instance* inst, ann_ctx* c, const ann_snap* s) {
 #ifdef ANN_NODE_PEAK
     int peak = c->nodePeak;
 #endif
+#ifdef ANN_PROFILE
+    long pd = c->draws, pp = c->depths, ps = c->passes, pa = c->antes;
+#endif
     *c = s->ctx;
 #ifdef ANN_NODE_PEAK
     c->nodePeak = peak;   // a high-water mark, not branch state
+#endif
+#ifdef ANN_PROFILE
+    c->draws = pd; c->depths = pp; c->passes = ps; c->antes = pa;
 #endif
 }
 
@@ -480,9 +552,9 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         for (int j = 0; j < _pack.size; j++) {
             rarity r = next_joker_rarity(inst, S_Buffoon, ante);
             item joker;
-            if (r == Rarity_Rare)          joker = randchoice_common(inst, R_Joker_Rare, S_Buffoon, ante, RARE_JOKERS);
-            else if (r == Rarity_Uncommon) joker = randchoice_common(inst, R_Joker_Uncommon, S_Buffoon, ante, UNCOMMON_JOKERS);
-            else                           joker = randchoice_common(inst, R_Joker_Common, S_Buffoon, ante, COMMON_JOKERS);
+            if (r == Rarity_Rare)          joker = ann_choice_guarded(inst, R_Joker_Rare, S_Buffoon, ante, RARE_JOKERS);
+            else if (r == Rarity_Uncommon) joker = ann_choice_guarded(inst, R_Joker_Uncommon, S_Buffoon, ante, UNCOMMON_JOKERS);
+            else                           joker = ann_choice_guarded(inst, R_Joker_Common, S_Buffoon, ante, COMMON_JOKERS);
             rr[j] = r;
             drawn[j] = joker;
             if (!inst->params.showman) i_lock(inst, joker); // temporary, as buffoon_pack does
@@ -498,10 +570,16 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             ann_credit(c, ann_value(drawn[j], &isCopy), isCopy);
             // Kept, so it leaves the Uncommon pool. Pack jokers are never
             // Negative Tag targets -- the tag only reads the shop queue.
-            if (rr[j] == Rarity_Uncommon) ann_keep_uncommon(inst, c, drawn[j]);
+            // ANN_POOL_EMPTY is Common, so it never enters the Uncommon pool
+            // accounting even when an Uncommon slot fell back to it.
+            if (rr[j] == Rarity_Uncommon && drawn[j] != ANN_POOL_EMPTY)
+                ann_keep_uncommon(inst, c, drawn[j]);
         }
     }
 
+#ifdef ANN_PROFILE
+    c->antes++;
+#endif
     // A first-slot Negative Tag is chained through every banked Double Tag the
     // moment it is taken, which is before this ante's shop: the colas are spent
     // and the count restarts from zero for later antes.
@@ -567,7 +645,7 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
 
     n = 0;
     for (int j = 0; j < jc; j++) if (a->rar[j] == ANN_R_RARE) a->poolSlot[n++] = (short)j;
-    ann_flush_pool(inst, R_Joker_Rare, S_Shop, ante, RARE_JOKERS, n, a->poolOut,
+    ann_flush_pool(inst, c, R_Joker_Rare, S_Shop, ante, RARE_JOKERS, n, a->poolOut,
                    (const ann_keep*)0, 0);
     for (int o = 0; o < n; o++) a->ident[a->poolSlot[o]] = a->poolOut[o];
 
@@ -582,7 +660,7 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         a->poolSlot[n++] = (short)j;
         if ((a->ed[j] & ANN_ED_NEGATIVE) || ann_is_target(a, j, wins, nwins)) lastCommon = n;
     }
-    ann_flush_pool(inst, R_Joker_Common, S_Shop, ante, COMMON_JOKERS, lastCommon, a->poolOut,
+    ann_flush_pool(inst, c, R_Joker_Common, S_Shop, ante, COMMON_JOKERS, lastCommon, a->poolOut,
                    (const ann_keep*)0, 0);
     for (int o = 0; o < lastCommon; o++) a->ident[a->poolSlot[o]] = a->poolOut[o];
 #endif
@@ -599,8 +677,11 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     for (int j = 0; j < jc; j++) if (a->rar[j] == ANN_R_UNCOMMON) a->poolSlot[n++] = (short)j;
     int finalized = 0;
     while (true) {
-        ann_flush_pool(inst, R_Joker_Uncommon, S_Shop, ante, UNCOMMON_JOKERS, n, a->poolOut,
+        ann_flush_pool(inst, c, R_Joker_Uncommon, S_Shop, ante, UNCOMMON_JOKERS, n, a->poolOut,
                        keeps, keepCount);
+#ifdef ANN_PROFILE
+        c->passes++;
+#endif
         // Accept as many keeps from this pass as stay trustworthy. Locking an
         // item only perturbs a later ordinal if that ordinal DREW it: a chain
         // terminates on the first unlocked item it hits, so an item that was
@@ -823,6 +904,9 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
     ctx.colas = 0; ctx.copies = 0; ctx.fives = 0; ctx.ones = 0;
     ctx.pendingWidth = 0; ctx.overstock = false; ctx.overstockPlus = false;
     ctx.uncAvail = uncAvail0;
+#ifdef ANN_PROFILE
+    ctx.draws = 0; ctx.depths = 0; ctx.passes = 0; ctx.antes = 0;
+#endif
 #ifdef ANN_NODE_PEAK
     ctx.nodePeak = 0;
 #endif
@@ -881,6 +965,14 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
             if (d < M && sc > altBest[d * 4 + choice[d]]) altBest[d * 4 + choice[d]] = sc;
         }
     }
+#ifdef ANN_PROFILE
+    // 1 = pool draws, 2 = resample-depth iterations, 3 = refinement passes,
+    // 4 = ante walks. Counters survive a branch restore, so these are the
+    // whole seed's totals.
+    return ANN_PROFILE == 1 ? ctx.draws
+         : ANN_PROFILE == 2 ? ctx.depths
+         : ANN_PROFILE == 3 ? ctx.passes : ctx.antes;
+#endif
     return best;
 }
 
