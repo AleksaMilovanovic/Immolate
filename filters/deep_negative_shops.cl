@@ -99,6 +99,22 @@ __constant item DNS_UNLOCKED_COMMONS[] = {};
 __constant item DNS_UNLOCKED_UNCOMMONS[] = {Showman};
 __constant item DNS_UNLOCKED_RARES[] = {Blueprint, Brainstorm};
 
+// ---------------------------------------------------------------------------
+// Tag locks. A locked tag rerolls when the game rolls it, which shifts every
+// later tag draw, so a profile that has not unlocked Foil, Holographic and
+// Polychrome Tags sees Negative Tags in different antes than a completed one.
+// Same list and same handling as filters/negative_tags.cl -- edit both together.
+// Leave the list empty ({}) for a fully unlocked profile.
+//
+// init_locks(ante 1) gates the tags and bosses that are locked behind an ante;
+// init_unlocks per ante lifts them on schedule. With DNS_FIRST_ANTE at 3 every
+// ante-gated tag is already open by the time a tag is drawn here, but the calls
+// keep the tag stream right if DNS_FIRST_ANTE is lowered. Neither touches
+// jokers (fresh_profile is false), so the DNS_*_LOCKED joker lists are
+// unaffected, and neither touches vouchers.
+// ---------------------------------------------------------------------------
+__constant item DNS_LOCKED_TAGS[] = { Foil_Tag, Holographic_Tag, Polychrome_Tag };
+
 #define DNS_APPLY_LOCKS(list, fn) for (int _i = 0; _i < (int)(sizeof(list) / sizeof(item)); _i++) fn(inst, list[_i]);
 
 #ifndef DNS_FIRST_ANTE
@@ -368,6 +384,8 @@ long filter(instance* inst) {
     DNS_APPLY_LOCKS(DNS_UNLOCKED_COMMONS, i_unlock)
     DNS_APPLY_LOCKS(DNS_UNLOCKED_UNCOMMONS, i_unlock)
     DNS_APPLY_LOCKS(DNS_UNLOCKED_RARES, i_unlock)
+    init_locks(inst, 1, false, false);
+    DNS_APPLY_LOCKS(DNS_LOCKED_TAGS, i_lock)
 
     int uncommonItemCount = (int)UNCOMMON_JOKERS[0];
     int rareItemCount = (int)RARE_JOKERS[0];
@@ -403,6 +421,7 @@ long filter(instance* inst) {
         inst->rngCache.nextFreeNode = 0;
         inst->rngCache.lastNode = -1;
 #endif
+        init_unlocks(inst, ante, false);
         item v = next_voucher(inst, ante);
         for (int i = 0; i < (int)(sizeof(DNS_BOUGHT_VOUCHERS) / sizeof(item)); i++) {
             if (DNS_BOUGHT_VOUCHERS[i] == v) { activate_voucher(inst, v); break; }

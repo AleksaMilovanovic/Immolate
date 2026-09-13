@@ -2,6 +2,8 @@
 
 In-depth explanations and usage guides are in the comments of each filter file.
 
+- **Analyze Naneinf Negatives:** Plans a naneinf shop line over antes 3-38: negative Blueprint/Brainstorm (+100), negative Baron/Mime/Burglar/DNA (+5), and optionally negative Juggler/Drunkard (+1, `-D ANN_SCORE_COMMONS`). Same shops, packs, vouchers and joker locks as Deep Negative Shops, plus the Diet Cola / Negative Tag trick: colas are sold on sight for Double Tags, negative Uncommons are kept and so leave the pool, and each Negative Tag turns `1 + colas` consecutive eligible shop jokers Negative. Every way of spending the tags is searched as a tree (first-slot copy window, first-slot Uncommon window, second-slot tag firing next ante, or bank), because a window's purchases lock Uncommons and really do change the later shops. Score is the flat weighted total of the best line. A seed offering more than `ANN_MAX_BRANCH_POINTS` (10) Negative Tags is not searched and returns `1000000000 + branch points`; `rank_naneinf.py` sorts the results and lists those separately. Meant for small `--from` pools -- a seed can cost up to 4^10 walks.
+	- For the strategy behind a score: `immolate -f analyze_naneinf_explain -s THESEED -n 1 -g 1 -c 0`
 - **Analyzer:** Prints a full analysis of a seed.
 	- To run this, the following syntax is recommended: `immolate -f analyzer -s THESEED -n 1 -g 1`
 	- It's also recommended to customize the filter itself to your needs. (deck, stake, maximum ante to search, number of cards per ante)
