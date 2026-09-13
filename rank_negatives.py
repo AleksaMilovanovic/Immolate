@@ -21,7 +21,13 @@ import heapq
 from immolate_text import read_lines
 
 
-def parse(lines, get_total_value, max_rows):
+def parse(lines, get_total_value, max_rows, minimums=None):
+    if minimums is not None:
+        tag2_min = minimums % 1000; minimums //= 1000
+        tag1_min = minimums % 1000; minimums //= 1000
+        other_min = minimums % 1000; minimums //= 1000
+        unc_min = minimums % 1000; minimums //= 1000
+        copy_min = minimums
     rows = []
     heapq.heapify(rows)
     for line in lines:
@@ -35,10 +41,20 @@ def parse(lines, get_total_value, max_rows):
         except ValueError:
             continue
         tag2 = value % 1000; value //= 1000
+        if tag2_min is not None and tag2 < tag2_min:
+            continue
         tag1 = value % 1000; value //= 1000
+        if tag1_min is not None and tag1 < tag1_min:
+            continue
         other = value % 1000; value //= 1000
+        if other_min is not None and other < other_min:
+            continue
         unc = value % 1000; value //= 1000
+        if unc_min is not None and unc < unc_min:
+            continue
         copy = value
+        if copy_min is not None and copy < copy_min:
+            continue
         total = get_total_value((seed, copy, unc, other, tag1, tag2))
         if len(rows) >= max_rows:
             if total > rows[0][0]:
@@ -58,11 +74,13 @@ def main():
     ap.add_argument("--tag1", type=float, default=0, help="weight per first-slot Negative Tag (default 0)")
     ap.add_argument("--tag2", type=float, default=0, help="weight per second-slot Negative Tag (default 0)")
     ap.add_argument("--csv", action="store_true", help="comma-separated output instead of aligned columns")
+    ap.add_argument("--minimums", type=int, help="weight per negative copy joker (default 25)")
+    
     a = ap.parse_args()
+    src = open(a.file, encoding="utf-8", errors="replace") if a.file else sys.stdin
 
-    src = read_lines(a.file)
     get_total_value = lambda r: r[1] * a.copy + r[2] * a.uncommon + r[3] * a.other + r[4] * a.tag1 + r[5] * a.tag2
-    rows = parse(src, get_total_value, a.top)
+    rows = parse(src, get_total_value, a.top, a.minimums)
     if not rows:
         sys.exit("no 'SEED (score)' lines found")
 
