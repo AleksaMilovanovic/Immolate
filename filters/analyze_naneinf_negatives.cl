@@ -684,6 +684,24 @@ int ann_pick_window(const ann_ante* a, int width, int limitCards, int minStart,
     return best;
 }
 
+// The choices an ante offers, in a stable order: NONE first, then whatever its
+// tags allow. A flat combination number indexes the branch tree through these,
+// which is what lets the tree be split across work-items.
+inline int ann_arity(uchar tag, int ante) {
+    int n = 1;                                        // NONE is always offered
+    if (tag & 1) n += 2;                              // T1_COPY, T1_UNC
+    if ((tag & 2) && ante < ANN_LAST_ANTE) n += 1;    // T2 needs a next ante
+    return n;
+}
+inline int ann_choice_at(uchar tag, int ante, int i) {
+    if (i == 0) return ANN_NONE;
+    if (tag & 1) {
+        if (i == 1) return ANN_T1_COPY;
+        if (i == 2) return ANN_T1_UNC;
+    }
+    return ANN_T2;
+}
+
 inline bool ann_offered(uchar tag, int ante, int choice) {
     if (choice == ANN_NONE) return true;
     if (choice == ANN_T1_COPY || choice == ANN_T1_UNC) return (tag & 1) != 0;
@@ -793,7 +811,8 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
 long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
                 const int* bpAnte, int M, const uchar* tagNeg,
                 int* bestChoice, ann_log* bestLog,
-                const int* refChoice, long* altBest) {
+                const int* refChoice, long* altBest,
+                int forcedDepth, const int* forcedChoice) {
     ann_ante a;
     ann_snap snap[ANN_MAX_BRANCH_POINTS + 1];
     ann_log cur[ANN_MAX_BRANCH_POINTS];
@@ -822,10 +841,16 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
     int depth = 0;
     choice[0] = -1;
     while (depth >= 0) {
-        choice[depth]++;
-        if (choice[depth] > ANN_T2) { depth--; continue; }
         int ante = bpAnte[depth];
-        if (!ann_offered(tagNeg[ante], ante, choice[depth])) continue;
+        if (depth < forcedDepth) {
+            // This branch point is pinned by the caller: one option, once.
+            if (choice[depth] >= 0) { depth--; continue; }
+            choice[depth] = forcedChoice[depth];
+        } else {
+            choice[depth]++;
+            if (choice[depth] > ANN_T2) { depth--; continue; }
+            if (!ann_offered(tagNeg[ante], ante, choice[depth])) continue;
+        }
 
         ann_restore(inst, &ctx, &snap[depth]);
         if (!ann_ante_step(inst, &ctx, &a, ante, sh, totalRate, choice[depth], &cur[depth]))
@@ -999,9 +1024,62 @@ long filter(instance* inst) {
     for (int index = 1; index <= (int)UNCOMMON_JOKERS[0]; index++)
         if (!i_locked(inst, UNCOMMON_JOKERS[index])) uncAvail0++;
 
+#ifdef GROUP_PER_SEED
+    // ---------------------------------------------------------------------
+    // One work-GROUP per seed: every lane holds the same seed and takes a
+    // share of the tree. Without this a seed is one work-item, so the search
+    // is serial however wide the device is -- and an M=10 seed is 59,049 leaf
+    // walks on a single thread, which on a consumer GPU (fp64 at 1/64 rate) is
+    // slower than on one CPU core. The whole batch then waits on that thread.
+    // Splitting the top of the tree across the group attacks the thing that
+    // actually sets wall time.
+    //
+    // Split by branch-point PREFIX, not by leaf: the shortest prefix with at
+    // least `lanes` combinations. Each lane still gets whole subtrees, so the
+    // DFS keeps its shared-prefix saving underneath the split. The kernel takes
+    // the max across lanes afterwards.
+    // ---------------------------------------------------------------------
+    int lane = (int)get_local_id(0);
+    int lanes = (int)get_local_size(0);
+    int splitDepth = 0;
+    long combos = 1;
+    while (splitDepth < M && combos < (long)lanes) {
+        combos *= (long)ann_arity(tagNeg[bpAnte[splitDepth]], bpAnte[splitDepth]);
+        splitDepth++;
+    }
+
+    // ann_search dirties only the lock set and the vouchers; no RNG state
+    // survives an ante, so this ~140-byte snapshot is the whole reset.
+    ann_ctx baseCtx;
+    baseCtx.colas = 0; baseCtx.copies = 0; baseCtx.fives = 0; baseCtx.ones = 0;
+    baseCtx.pendingWidth = 0; baseCtx.overstock = false; baseCtx.overstockPlus = false;
+    baseCtx.uncAvail = uncAvail0;
+#ifdef ANN_NODE_PEAK
+    baseCtx.nodePeak = 0;
+#endif
+    ann_snap base;
+    ann_save(inst, &baseCtx, &base);
+
+    long best = -1;
+    int forced[ANN_MAX_BRANCH_POINTS];
+    for (long c = (long)lane; c < combos; c += (long)lanes) {
+        long t = c;
+        for (int d = splitDepth - 1; d >= 0; d--) {
+            int ar = ann_arity(tagNeg[bpAnte[d]], bpAnte[d]);
+            forced[d] = ann_choice_at(tagNeg[bpAnte[d]], bpAnte[d], (int)(t % (long)ar));
+            t /= (long)ar;
+        }
+        ann_restore(inst, &baseCtx, &base);
+        long sc = ann_search(inst, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
+                             bestChoice, bestLog, (const int*)0, (long*)0,
+                             splitDepth, forced);
+        if (sc > best) best = sc;
+    }
+#else
     long best = ann_search(inst, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
                            bestChoice, bestLog,
-                           (const int*)0, (long*)0);
+                           (const int*)0, (long*)0, 0, (const int*)0);
+#endif
 
 #ifdef ANN_EXPLAIN
     {
@@ -1012,7 +1090,7 @@ long filter(instance* inst) {
         int again[ANN_MAX_BRANCH_POINTS];
         ann_log againLog[ANN_MAX_BRANCH_POINTS];
         ann_search(&pristine, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
-                   again, againLog, bestChoice, altBest);
+                   again, againLog, bestChoice, altBest, 0, (const int*)0);
         ann_explain(best, bpAnte, M, bestChoice, bestLog, altBest);
     }
 #endif
