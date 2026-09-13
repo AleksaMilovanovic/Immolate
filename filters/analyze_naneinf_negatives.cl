@@ -208,6 +208,15 @@ inline double ann_random(instance* inst, double* state, lrandom* scratch) {
     return l_random(scratch);
 }
 
+// What the winning line did at one branch point. `items` names the scoring
+// jokers the window actually turned Negative -- what the line is aiming for.
+#define ANN_LOG_ITEMS 12
+typedef struct AnnLog {
+    int ante, choice, width, startCard, copies, uncommons, colas, nitems, points;
+    int lastCopyCard, frameSize;
+    short items[ANN_LOG_ITEMS];
+} ann_log;
+
 // Running totals that a branch carries across antes.
 typedef struct AnnCtx {
 #ifdef ANN_PROFILE
@@ -220,7 +229,8 @@ typedef struct AnnCtx {
 #endif
     int colas;
     int copies, fives, ones;
-    int pendingWidth;   // a T2 tag taken last ante fires this ante at this width
+    int pendingWidth;    // a T2 tag taken last ante fires this ante at this width
+    ann_log* pendingLog; // that tag's own log, so its score is reported there
     int uncAvail;       // Uncommons still in the pool, for ANN_LOCK_FLOOR
     bool overstock, overstockPlus;
 } ann_ctx;
@@ -465,9 +475,14 @@ typedef struct AnnAnte {
     int eligCount;
 } ann_ante;
 
+
 // A Negative Tag window: `width` consecutive eligible shop jokers starting at
 // eligible-target ordinal `start`, all of which must sit before `limitCards`.
-typedef struct AnnWin { int start, width, limitCards; } ann_win;
+// `log` says where this window's score is reported. For a first-slot window
+// that is the ante's own log; for a second-slot window it is the log of the
+// EARLIER ante whose tag created it, so the points land against the tag that
+// paid for them rather than the ante they happen to land in.
+typedef struct AnnWin { int start, width, limitCards; ann_log* log; } ann_win;
 
 // At most one keep per Uncommon in the pool, and a kept one never comes back.
 #define ANN_MAX_KEEPS 80
@@ -475,10 +490,30 @@ typedef struct AnnWin { int start, width, limitCards; } ann_win;
 // Is this shop joker inside a Negative Tag window? elig is -1 for a joker that
 // already has an edition, and window starts are never negative, so those never
 // match.
-inline bool ann_is_target(const ann_ante* a, int slot, const ann_win* wins, int nwins) {
+inline int ann_target_window(const ann_ante* a, int slot, const ann_win* wins, int nwins) {
     for (int w = 0; w < nwins; w++)
         if (a->elig[slot] >= wins[w].start && a->elig[slot] < wins[w].start + wins[w].width)
-            return true;
+            return w;
+    return -1;
+}
+inline bool ann_is_target(const ann_ante* a, int slot, const ann_win* wins, int nwins) {
+    return ann_target_window(a, slot, wins, nwins) >= 0;
+}
+
+// Uncommons that are never bought, even Negative. They score nothing, they are
+// never kept -- so they stay in the pool and cannot shrink it for Diet Cola --
+// and a Negative Tag window does not count them towards its Uncommon total: a
+// window that spends its negatives on these has bought nothing.
+//
+// Burglar is the exception. From ANN_BURGLAR_FROM_ANTE it is worth a slot and
+// is kept like any other Uncommon; it still scores nothing, it just shrinks the
+// pool from that ante on.
+#ifndef ANN_BURGLAR_FROM_ANTE
+#define ANN_BURGLAR_FROM_ANTE 35
+#endif
+inline bool ann_never_buy(item joker, int ante) {
+    if (joker == Madness || joker == Showman) return true;
+    if (joker == Burglar) return ante < ANN_BURGLAR_FROM_ANTE;
     return false;
 }
 
@@ -486,7 +521,7 @@ inline bool ann_is_target(const ann_ante* a, int slot, const ann_win* wins, int 
 inline int ann_value(item joker, bool* isCopy) {
     *isCopy = (joker == Blueprint || joker == Brainstorm);
     if (*isCopy) return ANN_W_COPY;
-    if (joker == Baron || joker == DNA || joker == Mime || joker == Burglar) return ANN_W_FIVE;
+    if (joker == Baron || joker == DNA || joker == Mime) return ANN_W_FIVE;
 #ifdef ANN_SCORE_COMMONS
     if (joker == Juggler || joker == Drunkard) return ANN_W_ONE;
 #endif
@@ -508,14 +543,6 @@ inline void ann_credit(ann_ctx* c, int value, bool isCopy) {
     else if (value == ANN_W_ONE) c->ones++;
 }
 
-// What the winning line did at one branch point. `items` names the scoring
-// jokers the window actually turned Negative -- what the line is aiming for.
-#define ANN_LOG_ITEMS 12
-typedef struct AnnLog {
-    int ante, choice, width, startCard, copies, uncommons, colas, nitems;
-    int lastCopyCard, frameSize;
-    short items[ANN_LOG_ITEMS];
-} ann_log;
 
 // ---------------------------------------------------------------------------
 // One ante. Called twice per branch that spends a tag: once with no window, to
@@ -572,7 +599,8 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             // Negative Tag targets -- the tag only reads the shop queue.
             // ANN_POOL_EMPTY is Common, so it never enters the Uncommon pool
             // accounting even when an Uncommon slot fell back to it.
-            if (rr[j] == Rarity_Uncommon && drawn[j] != ANN_POOL_EMPTY)
+            if (rr[j] == Rarity_Uncommon && drawn[j] != ANN_POOL_EMPTY
+                && !ann_never_buy(drawn[j], ante))
                 ann_keep_uncommon(inst, c, drawn[j]);
         }
     }
@@ -697,7 +725,9 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             bool perturbed = false;
             for (int i = 0; i < added; i++) if (newly[i] == (short)id) { perturbed = true; break; }
             if (perturbed) break;   // trust horizon
-            if (id == Diet_Cola) continue;   // always sold, so never kept
+            if (id == Diet_Cola) continue;         // always sold, so never kept
+            if (id == ANN_POOL_EMPTY) continue;    // exhausted-pool fallback, a Common
+            if (ann_never_buy(id, ante)) continue; // never bought, so never kept
             int slot = a->poolSlot[o];
             if (!((a->ed[slot] & ANN_ED_NEGATIVE) || ann_is_target(a, slot, wins, nwins))) continue;
             if (c->uncAvail <= ANN_LOCK_FLOOR || keepCount >= ANN_MAX_KEEPS) { o = n; break; }
@@ -719,17 +749,21 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     for (int j = 0; j < jc; j++) {
         item id = (item)a->ident[j];
         if (id == Diet_Cola) { c->colas++; continue; }   // sold on sight
-        bool target = ann_is_target(a, j, wins, nwins);
-        if (!(a->ed[j] & ANN_ED_NEGATIVE) && !target) continue;
+        int w = ann_target_window(a, j, wins, nwins);
+        if (!(a->ed[j] & ANN_ED_NEGATIVE) && w < 0) continue;
 
         bool isCopy;
         int value = ann_value(id, &isCopy);
         ann_credit(c, value, isCopy);
-        if (target && log != 0) {
-            if (value > 0 && log->nitems < ANN_LOG_ITEMS) log->items[log->nitems++] = (short)id;
+        if (w >= 0 && wins[w].log != 0) {
+            // Reported against the window that made it Negative, which for a
+            // second-slot tag is an earlier ante's log than this one.
+            ann_log* wl = wins[w].log;
+            wl->points += value;
+            if (value > 0 && wl->nitems < ANN_LOG_ITEMS) wl->items[wl->nitems++] = (short)id;
             // Showman is sold on the first frame boundary after the last copy
             // joker the window takes.
-            if (isCopy) log->lastCopyCard = a->cardIdx[j];
+            if (isCopy) wl->lastCopyCard = a->cardIdx[j];
         }
     }
 #ifdef ANN_NODE_PEAK
@@ -742,7 +776,7 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
 // remaining ties. Returns -1 when no window of that width fits before
 // limitCards. Read off the scouting walk, so it is a guess about the committed
 // stream, not a promise -- the committed walk is what gets scored.
-int ann_pick_window(const ann_ante* a, int width, int limitCards, int minStart,
+int ann_pick_window(const ann_ante* a, int ante, int width, int limitCards, int minStart,
                     bool byCopy, int* outCopies, int* outUnc) {
     int best = -1, bc = 0, bu = 0;
     for (int ws = minStart; ws + width <= a->eligCount; ws++) {
@@ -754,7 +788,9 @@ int ann_pick_window(const ann_ante* a, int width, int limitCards, int minStart,
             int slot = a->eligSlot[ws + k];
             item id = (item)a->ident[slot];
             if (id == Blueprint || id == Brainstorm) copies++;
-            if (a->rar[slot] == ANN_R_UNCOMMON) unc++;
+            // Only Uncommons that would actually be bought: the rest leave the
+            // pool untouched, which is the entire point of this branch.
+            if (a->rar[slot] == ANN_R_UNCOMMON && !ann_never_buy(id, ante)) unc++;
         }
         bool better = byCopy ? (copies > bc || (copies == bc && unc > bu))
                              : (unc > bu || (unc == bu && copies > bc));
@@ -807,13 +843,22 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     // first walk rather than being bolted on afterwards -- otherwise a
     // first-slot window in the same ante would be chosen off a stream missing
     // this window's locks.
+    ann_log* pendLog = 0;
     if (c->pendingWidth > 0) {
         wins[nw].start = 0;
         wins[nw].width = c->pendingWidth;
         wins[nw].limitCards = 1 << 30;   // a second-slot window has no half limit
+        wins[nw].log = c->pendingLog;    // score it against the tag that paid
+        pendLog = c->pendingLog;
         nw++;
     }
     c->pendingWidth = 0;
+    c->pendingLog = 0;
+    // The scouting walk below scores any pending window, and the committed walk
+    // scores it again, so its log has to be rewound in between.
+    int pendPoints0 = pendLog ? pendLog->points : 0;
+    int pendItems0 = pendLog ? pendLog->nitems : 0;
+    int pendCopy0 = pendLog ? pendLog->lastCopyCard : -1;
 
     log->ante = ante;
     log->choice = choice;
@@ -824,6 +869,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     log->nitems = 0;
     log->lastCopyCard = -1;
     log->frameSize = 0;
+    log->points = 0;
 
     // For NONE and T2 this is the whole line. For a first-slot tag it also
     // scouts the queue the window will be chosen from.
@@ -837,7 +883,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         int minStart = nw > 0 ? wins[0].start + wins[0].width : 0;
         int width = 1 + colasAfterPacks;
         int copies = 0, unc = 0;
-        int ws = ann_pick_window(a, width, a->halfCards, minStart,
+        int ws = ann_pick_window(a, ante, width, a->halfCards, minStart,
                                  choice == ANN_T1_COPY, &copies, &unc);
         if (ws < 0) return false;
         // A copy-joker window holding no copy joker is just a worse NONE.
@@ -848,6 +894,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         wins[nw].start = ws;
         wins[nw].width = width;
         wins[nw].limitCards = a->halfCards;
+        wins[nw].log = log;   // a first-slot window scores in its own ante
         nw++;
 
         // Commit: redraw the ante from its own snapshot with the window in
@@ -855,8 +902,15 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         // picked on are a guess past its start and only this walk is scored.
         ann_restore(inst, c, &start);
         c->pendingWidth = 0;
+        c->pendingLog = 0;
         log->nitems = 0;
         log->lastCopyCard = -1;
+        log->points = 0;
+        if (pendLog) {   // undo what the scouting walk credited to it
+            pendLog->points = pendPoints0;
+            pendLog->nitems = pendItems0;
+            pendLog->lastCopyCard = pendCopy0;
+        }
         ann_ante_walk(inst, c, a, ante, sh, totalRate, wins, nw, &colasAfterPacks, true, log);
         log->colas = colasAfterPacks;
         log->width = width;
@@ -869,6 +923,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         // Taken now: the banked colas are sold and chained now, and the tag
         // fires in the next ante.
         c->pendingWidth = 1 + c->colas;
+        c->pendingLog = log;   // its window fires next ante but scores here
         c->colas = 0;
         log->width = c->pendingWidth;
     }
@@ -893,7 +948,8 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
                 const int* bpAnte, int M, const uchar* tagNeg,
                 int* bestChoice, ann_log* bestLog,
                 const int* refChoice, long* altBest,
-                int forcedDepth, const int* forcedChoice) {
+                int forcedDepth, const int* forcedChoice,
+                ann_ctx* bestCtxOut) {
     ann_ante a;
     ann_snap snap[ANN_MAX_BRANCH_POINTS + 1];
     ann_log cur[ANN_MAX_BRANCH_POINTS];
@@ -902,7 +958,8 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
     ann_ctx ctx;
 
     ctx.colas = 0; ctx.copies = 0; ctx.fives = 0; ctx.ones = 0;
-    ctx.pendingWidth = 0; ctx.overstock = false; ctx.overstockPlus = false;
+    ctx.pendingWidth = 0; ctx.pendingLog = 0;
+    ctx.overstock = false; ctx.overstockPlus = false;
     ctx.uncAvail = uncAvail0;
 #ifdef ANN_PROFILE
     ctx.draws = 0; ctx.depths = 0; ctx.passes = 0; ctx.antes = 0;
@@ -914,11 +971,14 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
     int firstBp = (M > 0) ? bpAnte[0] : ANN_LAST_ANTE + 1;
     for (int ante = 1; ante < firstBp; ante++)
         ann_ante_step(inst, &ctx, &a, ante, sh, totalRate, ANN_NONE, &dump);
+    if (M == 0) {
+        if (bestCtxOut != 0) *bestCtxOut = ctx;
 #ifdef ANN_NODE_PEAK
-    if (M == 0) return ctx.nodePeak;
+        return ctx.nodePeak;
 #else
-    if (M == 0) return ann_score(&ctx);
+        return ann_score(&ctx);
 #endif
+    }
 
     long best = -1;
     ann_save(inst, &ctx, &snap[0]);
@@ -958,6 +1018,7 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
         if (sc > best) {
             best = sc;
             for (int d = 0; d < M; d++) { bestChoice[d] = choice[d]; bestLog[d] = cur[d]; }
+            if (bestCtxOut != 0) *bestCtxOut = ctx;   // for the explain breakdown
         }
         if (altBest != 0) {
             int d = 0;
@@ -986,19 +1047,33 @@ void ann_print_choice(int ch) {
 
 void ann_explain(long best, const int* bpAnte, int M,
                  const int* bestChoice, const ann_log* bestLog,
-                 const long* altBest) {
-    printf("score %d over %d branch point(s)\n", (int)best, M);
+                 const long* altBest, const ann_ctx* bc) {
+    // Where the score comes from, so the per-tag lines below add up to
+    // something rather than leaving most of the total unexplained. Everything a
+    // Negative Tag window turned Negative is charged to that tag; everything
+    // else was already Negative when it was found.
+    int tagged = 0;
+    for (int d = 0; d < M; d++) tagged += bestLog[d].points;
+    printf("score %d  =  %d copy x%d + %d Baron/Mime/DNA x%d",
+           (int)best, bc->copies, ANN_W_COPY, bc->fives, ANN_W_FIVE);
+#ifdef ANN_SCORE_COMMONS
+    printf(" + %d Juggler/Drunkard x%d", bc->ones, ANN_W_ONE);
+#endif
+    printf("\n         of which  +%d from negative tags, +%d found already Negative\n",
+           tagged, (int)best - tagged);
+    printf("         %d Diet Cola(s) left unspent at the end\n", bc->colas);
+    printf("%d branch point(s):\n", M);
     for (int d = 0; d < M; d++) {
         const ann_log* g = &bestLog[d];
         int ch = bestChoice[d];
         printf("ante %2d  ", bpAnte[d]);
         ann_print_choice(ch);
         if (ch == ANN_T1_COPY || ch == ANN_T1_UNC) {
-            printf("  colas %2d -> %2d negatives, from shop card %d  (%d copy, %d uncommon)",
-                   g->colas, g->width, g->startCard, g->copies, g->uncommons);
+            printf("  colas %2d -> %2d negatives, from shop card %d  (%d copy, %d uncommon)  = +%d",
+                   g->colas, g->width, g->startCard, g->copies, g->uncommons, g->points);
         } else if (ch == ANN_T2) {
-            printf("  colas %2d -> %2d negatives, fires ante %d from card 0",
-                   g->width - 1, g->width, bpAnte[d] + 1);
+            printf("  colas %2d -> %2d negatives, fires ante %d from card 0  = +%d",
+                   g->width - 1, g->width, bpAnte[d] + 1, g->points);
         } else {
             printf("  bank %d cola(s)", g->colas);
         }
@@ -1107,6 +1182,8 @@ long filter(instance* inst) {
 
     int bestChoice[ANN_MAX_BRANCH_POINTS];
     ann_log bestLog[ANN_MAX_BRANCH_POINTS];
+    ann_ctx bestCtx;
+    bestCtx.copies = 0; bestCtx.fives = 0; bestCtx.ones = 0; bestCtx.colas = 0;
     for (int d = 0; d < ANN_MAX_BRANCH_POINTS; d++) bestChoice[d] = ANN_NONE;
 
 #ifdef ANN_EXPLAIN
@@ -1144,7 +1221,8 @@ long filter(instance* inst) {
     // survives an ante, so this ~140-byte snapshot is the whole reset.
     ann_ctx baseCtx;
     baseCtx.colas = 0; baseCtx.copies = 0; baseCtx.fives = 0; baseCtx.ones = 0;
-    baseCtx.pendingWidth = 0; baseCtx.overstock = false; baseCtx.overstockPlus = false;
+    baseCtx.pendingWidth = 0; baseCtx.pendingLog = 0;
+    baseCtx.overstock = false; baseCtx.overstockPlus = false;
     baseCtx.uncAvail = uncAvail0;
 #ifdef ANN_NODE_PEAK
     baseCtx.nodePeak = 0;
@@ -1164,13 +1242,13 @@ long filter(instance* inst) {
         ann_restore(inst, &baseCtx, &base);
         long sc = ann_search(inst, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
                              bestChoice, bestLog, (const int*)0, (long*)0,
-                             splitDepth, forced);
+                             splitDepth, forced, (ann_ctx*)0);
         if (sc > best) best = sc;
     }
 #else
     long best = ann_search(inst, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
                            bestChoice, bestLog,
-                           (const int*)0, (long*)0, 0, (const int*)0);
+                           (const int*)0, (long*)0, 0, (const int*)0, &bestCtx);
 #endif
 
 #ifdef ANN_EXPLAIN
@@ -1182,8 +1260,8 @@ long filter(instance* inst) {
         int again[ANN_MAX_BRANCH_POINTS];
         ann_log againLog[ANN_MAX_BRANCH_POINTS];
         ann_search(&pristine, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
-                   again, againLog, bestChoice, altBest, 0, (const int*)0);
-        ann_explain(best, bpAnte, M, bestChoice, bestLog, altBest);
+                   again, againLog, bestChoice, altBest, 0, (const int*)0, (ann_ctx*)0);
+        ann_explain(best, bpAnte, M, bestChoice, bestLog, altBest, &bestCtx);
     }
 #endif
     if (inst->rngCache.reportedOverflow) return ANN_CACHE_OVERFLOW;
