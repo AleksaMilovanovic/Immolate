@@ -13,14 +13,14 @@ seed parked for exceeding ANN_MAX_BRANCH_POINTS; M is still its true count.
 import sys
 import collections
 
+from immolate_text import read_lines
+
 OVER = 1_000_000_000
 
 
 def main():
     scored, parked = collections.Counter(), collections.Counter()
-    src = open(sys.argv[1]) if len(sys.argv) > 1 else sys.stdin
-    with src as fh:
-        for line in fh:
+    for line in read_lines(sys.argv[1] if len(sys.argv) > 1 else None):
             line = line.strip()
             i = line.find(" (")
             if i < 0 or not line.endswith(")"):
@@ -33,7 +33,7 @@ def main():
 
     total = sum(scored.values()) + sum(parked.values())
     if not total:
-        print("no probe lines found", file=sys.stderr)
+        print("no probe lines found -- expected lines like 'KUI1MAFJ (7)'", file=sys.stderr)
         return 1
     work = {m: c * 3 ** m for m, c in scored.items()}
     tw = sum(work.values()) or 1

@@ -29,6 +29,8 @@ was built with ANN_SCORE_COMMONS.
 import argparse
 import sys
 
+from immolate_text import read_lines
+
 OVER_BUDGET = 1_000_000_000
 CACHE_OVERFLOW = 2_000_000_000
 
@@ -64,9 +66,7 @@ def main():
     ap.add_argument("--csv", action="store_true", help="comma-separated output")
     a = ap.parse_args()
 
-    stream = open(a.file) if a.file else sys.stdin
-    with stream:
-        scored, parked, broken = parse(stream)
+    scored, parked, broken = parse(read_lines(a.file))
 
     scored.sort(reverse=True)
     for value, seed in scored[:a.top]:

@@ -18,6 +18,8 @@ import argparse
 import sys
 import heapq
 
+from immolate_text import read_lines
+
 
 def parse(lines, get_total_value, max_rows):
     rows = []
@@ -58,14 +60,16 @@ def main():
     ap.add_argument("--csv", action="store_true", help="comma-separated output instead of aligned columns")
     a = ap.parse_args()
 
-    src = open(a.file, encoding="utf-8", errors="replace") if a.file else sys.stdin
+    src = read_lines(a.file)
     get_total_value = lambda r: r[1] * a.copy + r[2] * a.uncommon + r[3] * a.other + r[4] * a.tag1 + r[5] * a.tag2
-    rows = parse(src, get_total_value, a.n)
+    rows = parse(src, get_total_value, a.top)
     if not rows:
         sys.exit("no 'SEED (score)' lines found")
 
+    # parse() builds heap rows as (total, seed, ...) so the heap orders on
+    # total; reorder to put the seed first for printing.
     ranked = []
-    for seed, copy, unc, other, tag1, tag2, total in rows:
+    for total, seed, copy, unc, other, tag1, tag2 in rows:
         ranked.append((seed, copy, unc, other, tag1, tag2, total))
     # Primary key total, uncommon, copy, other; stable sort so ties keep file order.
     ranked.sort(key=lambda r: (r[6], r[2], r[1], r[3]), reverse=True)
