@@ -1,42 +1,45 @@
 # analyze_naneinf_negatives reference scores.
 #
-# Regenerated after the never-buy change: Burglar/Madness/Showman are no longer
-# purchased (so never kept, and not counted towards a window's Uncommon total),
-# and Burglar no longer scores -- except that Burglar IS kept from ante 35 on.
-# The previous values came from an RTX 5080 run and are no longer reproducible
-# by design; 21 of these 32 scores dropped, 11 held, none rose.
+# Regenerated after Diet Cola farming: a non-Negative copy joker met after the
+# first Diet Cola is worth one more cola (sell the copy joker you hold, buy the
+# next), per kind, until a Negative one of that kind turns up. A tag then spends
+# 90% of the stock, rounded down.
 #
-# Generated on pocl. pocl and the 5080 agreed on all 32 before this change, so
-# it remains a cross-platform baseline.
-1111112U 415
+# Scores rose sharply -- 22 of 32 up, 9 unchanged, 1 down, +25% overall. The one
+# that fell is expected, not a fault: more colas means wider windows, which keep
+# more Uncommons, which drains the pool faster and shifts every later draw.
+#
+# Generated on pocl. pocl and the 5080 agreed on all 32 before these model
+# changes, so it remains a cross-platform baseline.
+1111112U 420
 1111112V 200
-1111112W 5
-1111112X 5
-1111112Y 210
-1111112Z 315
-11111131 230
-11111132 715
-11111133 625
-11111134 225
+1111112W 10
+1111112X 310
+1111112Y 215
+1111112Z 415
+11111131 325
+11111132 830
+11111133 825
+11111134 330
 11111135 410
-11111136 715
-11111137 205
+11111136 810
+11111137 310
 11111138 300
-11111139 510
-1111113A 720
+11111139 515
+1111113A 1040
 1111113B 0
 1111113C 0
-1111113D 5
+1111113D 110
 1111113E 515
-1111113F 705
-1111113G 310
-1111113H 210
-1111113I 105
-1111113J 305
-1111113K 415
+1111113F 805
+1111113G 520
+1111113H 325
+1111113I 220
+1111113J 410
+1111113K 410
 1111113L 710
-1111113M 200
-1111113N 205
+1111113M 205
+1111113N 210
 1111113O 100
 1111113P 5
-1111113Q 310
+1111113Q 615

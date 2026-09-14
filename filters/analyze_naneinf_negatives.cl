@@ -109,6 +109,13 @@
 #ifndef ANN_MAX_BRANCH_POINTS
 #define ANN_MAX_BRANCH_POINTS 14
 #endif
+#if defined(ANN_EXPLAIN) && defined(GROUP_PER_SEED)
+// Every lane would run the printout for its own share of the tree, so the
+// output would be several interleaved strategies for one seed with no way to
+// tell which lane won. Explain one seed at a time instead.
+#error "ANN_EXPLAIN and GROUP_PER_SEED cannot be combined; drop --group_per_seed"
+#endif
+
 #define ANN_OVER_BUDGET 1000000000L
 // A cache overflow leaves that seed's score quietly wrong, and it is likeliest
 // on exactly the seeds worth keeping (see the NODE BUDGET note). Report it as a
@@ -229,6 +236,9 @@ typedef struct AnnCtx {
 #endif
     int colas;
     int copies, fives, ones;
+    bool seenCola;       // a Diet Cola has been met, so a template exists to copy
+    bool negBlueprint;   // a Negative one of this kind is owned, so it is kept
+    bool negBrainstorm;  //   rather than sold -- farming stops for that kind
     int pendingWidth;    // a T2 tag taken last ante fires this ante at this width
     ann_log* pendingLog; // that tag's own log, so its score is reported there
     int uncAvail;       // Uncommons still in the pool, for ANN_LOCK_FLOOR
@@ -528,6 +538,41 @@ inline int ann_value(item joker, bool* isCopy) {
     return 0;
 }
 
+// Farming Diet Colas off copy jokers.
+//
+// A held Diet Cola is copied by a copy joker, which therefore also carries
+// "sell this card to create a free Double Tag". Selling the copy joker you have
+// and buying the next one nets a Double Tag each time, so every non-Negative
+// copy joker met after the first Diet Cola is worth one more cola. Editions do
+// not matter -- a Foil Blueprint sells just as well.
+//
+// It stops per kind once a Negative one of that kind turns up: that one is kept
+// rather than sold. So a negative Blueprint leaves Brainstorm still farming, and
+// only both together shut it off.
+inline void ann_saw_copy(ann_ctx* c, item joker, bool negative) {
+    bool bp = (joker == Blueprint);
+    if (negative) {
+        if (bp) c->negBlueprint = true; else c->negBrainstorm = true;
+        return;
+    }
+    if (c->seenCola && !(bp ? c->negBlueprint : c->negBrainstorm)) c->colas++;
+}
+
+// Colas are worth ~90% of the count when actually cashed in: one is held as the
+// farming template, and a real run is not perfectly efficient. Applied only
+// where a tag spends them, never to the stock itself -- banking is a line the
+// search is meant to weigh, and taxing it per branch point would quietly bias
+// against it.
+#ifndef ANN_COLA_EFFICIENCY_NUM
+#define ANN_COLA_EFFICIENCY_NUM 9
+#endif
+#ifndef ANN_COLA_EFFICIENCY_DEN
+#define ANN_COLA_EFFICIENCY_DEN 10
+#endif
+inline int ann_colas_effective(int colas) {
+    return (int)(((long)colas * ANN_COLA_EFFICIENCY_NUM) / ANN_COLA_EFFICIENCY_DEN);
+}
+
 // Keeping a negative Uncommon takes it out of the pool. Never take the last
 // few if a floor is set: a pool drawn down to nothing is what makes the
 // resample chains, and the node budget, run away.
@@ -591,7 +636,9 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         // permanent lock taken here is not undone by the loop above.
         for (int j = 0; j < _pack.size; j++) {
             bool negative = next_joker_edition(inst, S_Buffoon, ante) == Negative;
-            if (drawn[j] == Diet_Cola) { c->colas++; continue; }  // sold on sight
+            if (drawn[j] == Diet_Cola) { c->colas++; c->seenCola = true; continue; }
+            if (drawn[j] == Blueprint || drawn[j] == Brainstorm)
+                ann_saw_copy(c, drawn[j], negative);
             if (!negative) continue;
             bool isCopy;
             ann_credit(c, ann_value(drawn[j], &isCopy), isCopy);
@@ -748,9 +795,12 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     // ---- score, in queue order ----
     for (int j = 0; j < jc; j++) {
         item id = (item)a->ident[j];
-        if (id == Diet_Cola) { c->colas++; continue; }   // sold on sight
+        if (id == Diet_Cola) { c->colas++; c->seenCola = true; continue; }
         int w = ann_target_window(a, j, wins, nwins);
-        if (!(a->ed[j] & ANN_ED_NEGATIVE) && w < 0) continue;
+        // A window target is made Negative by the tag, so it counts as one here.
+        bool negative = (a->ed[j] & ANN_ED_NEGATIVE) || w >= 0;
+        if (id == Blueprint || id == Brainstorm) ann_saw_copy(c, id, negative);
+        if (!negative) continue;
 
         bool isCopy;
         int value = ann_value(id, &isCopy);
@@ -881,7 +931,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         // Everything inside a pending window is already Negative, so a
         // first-slot window here starts after it.
         int minStart = nw > 0 ? wins[0].start + wins[0].width : 0;
-        int width = 1 + colasAfterPacks;
+        int width = 1 + ann_colas_effective(colasAfterPacks);
         int copies = 0, unc = 0;
         int ws = ann_pick_window(a, ante, width, a->halfCards, minStart,
                                  choice == ANN_T1_COPY, &copies, &unc);
@@ -919,10 +969,12 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         log->uncommons = unc;
     }
 
+    if (choice == ANN_NONE) log->colas = c->colas;   // what actually got banked
     if (choice == ANN_T2) {
         // Taken now: the banked colas are sold and chained now, and the tag
         // fires in the next ante.
-        c->pendingWidth = 1 + c->colas;
+        log->colas = c->colas;   // raw stock; the width below is the 90% of it
+        c->pendingWidth = 1 + ann_colas_effective(c->colas);
         c->pendingLog = log;   // its window fires next ante but scores here
         c->colas = 0;
         log->width = c->pendingWidth;
@@ -958,6 +1010,7 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
     ann_ctx ctx;
 
     ctx.colas = 0; ctx.copies = 0; ctx.fives = 0; ctx.ones = 0;
+    ctx.seenCola = false; ctx.negBlueprint = false; ctx.negBrainstorm = false;
     ctx.pendingWidth = 0; ctx.pendingLog = 0;
     ctx.overstock = false; ctx.overstockPlus = false;
     ctx.uncAvail = uncAvail0;
@@ -1068,12 +1121,14 @@ void ann_explain(long best, const int* bpAnte, int M,
         int ch = bestChoice[d];
         printf("ante %2d  ", bpAnte[d]);
         ann_print_choice(ch);
+        // `colas` is the raw stock; the width is 1 + 90% of it, so both are
+        // shown rather than leaving the shortfall unexplained.
         if (ch == ANN_T1_COPY || ch == ANN_T1_UNC) {
-            printf("  colas %2d -> %2d negatives, from shop card %d  (%d copy, %d uncommon)  = +%d",
-                   g->colas, g->width, g->startCard, g->copies, g->uncommons, g->points);
+            printf("  colas %d (x0.9 = %d) -> %d negatives, from shop card %d  (%d copy, %d uncommon)  = +%d",
+                   g->colas, g->width - 1, g->width, g->startCard, g->copies, g->uncommons, g->points);
         } else if (ch == ANN_T2) {
-            printf("  colas %2d -> %2d negatives, fires ante %d from card 0  = +%d",
-                   g->width - 1, g->width, bpAnte[d] + 1, g->points);
+            printf("  colas %d (x0.9 = %d) -> %d negatives, fires ante %d from card 0  = +%d",
+                   g->colas, g->width - 1, g->width, bpAnte[d] + 1, g->points);
         } else {
             printf("  bank %d cola(s)", g->colas);
         }
@@ -1221,6 +1276,7 @@ long filter(instance* inst) {
     // survives an ante, so this ~140-byte snapshot is the whole reset.
     ann_ctx baseCtx;
     baseCtx.colas = 0; baseCtx.copies = 0; baseCtx.fives = 0; baseCtx.ones = 0;
+    baseCtx.seenCola = false; baseCtx.negBlueprint = false; baseCtx.negBrainstorm = false;
     baseCtx.pendingWidth = 0; baseCtx.pendingLog = 0;
     baseCtx.overstock = false; baseCtx.overstockPlus = false;
     baseCtx.uncAvail = uncAvail0;
@@ -1255,12 +1311,20 @@ long filter(instance* inst) {
     {
         // Second pass: the winning line is known now, so every leaf can be
         // charged to the first branch point where it left that line.
+        //
+        // It costs a whole extra search, which on a seed with many branch
+        // points is the difference between half a minute and a minute and a
+        // half. -D ANN_NO_ALTS skips it and prints the winning line only.
         long altBest[ANN_MAX_BRANCH_POINTS * 4];
         for (int i = 0; i < ANN_MAX_BRANCH_POINTS * 4; i++) altBest[i] = -1;
+#ifndef ANN_NO_ALTS
         int again[ANN_MAX_BRANCH_POINTS];
         ann_log againLog[ANN_MAX_BRANCH_POINTS];
         ann_search(&pristine, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
                    again, againLog, bestChoice, altBest, 0, (const int*)0, (ann_ctx*)0);
+#else
+        (void)pristine;
+#endif
         ann_explain(best, bpAnte, M, bestChoice, bestLog, altBest, &bestCtx);
     }
 #endif
