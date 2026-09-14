@@ -679,7 +679,10 @@ int main(int argc, char **argv) {
         int ok = 1;
         char src_path[MAX_PATH + 64];
         snprintf(src_path, sizeof src_path, "%s%s%s%s%s.cl", executable_dir, PATH_SEPARATOR, filterDir, PATH_SEPARATOR, filter);
-        h = fnv1a_file(h, src_path, &ok);
+        // Follows #includes: a wrapper filter's own source says nothing about
+        // the filter it wraps, and reusing a binary across a change to that is
+        // silent and produces wrong results.
+        h = fnv1a_source_tree(h, src_path, executable_dir, &ok, 4, 1);
         static const char* libFiles[] = {"immolate.cl", "util.cl", "seed.cl", "items.cl", "debug.cl", "cache.cl", "instance.cl", "functions.cl"};
         for (size_t i = 0; i < sizeof(libFiles) / sizeof(libFiles[0]); i++) {
             snprintf(src_path, sizeof src_path, "%s%slib%s%s", executable_dir, PATH_SEPARATOR, PATH_SEPARATOR, libFiles[i]);
@@ -709,7 +712,7 @@ int main(int argc, char **argv) {
                 if (ssKernelProgram != NULL) clReleaseProgram(ssKernelProgram);
                 ssKernelProgram = NULL;
             } else {
-                printf_s("Loaded compiled kernel from cache (sources hashed under %s%slib and %s%s%s).\n", executable_dir, PATH_SEPARATOR, executable_dir, PATH_SEPARATOR, filterDir);
+                printf_s("Loaded compiled kernel from cache (%s%s%s.cl with its includes, and %s%slib).\n", filterDir, PATH_SEPARATOR, filter, executable_dir, PATH_SEPARATOR);
                 loadedFromCache = 1;
             }
             free(bin);

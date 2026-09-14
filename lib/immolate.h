@@ -85,6 +85,55 @@ cl_ulong fnv1a_file(cl_ulong h, const char* path, int* ok) {
     free(buf);
     return h;
 }
+// Hashes a kernel source and, recursively, every project source it #includes.
+//
+// Hashing only the named filter left the cache key blind to the file that
+// actually matters whenever a filter is a WRAPPER: diagnostics/diag_*.cl and
+// filters/analyze_naneinf_explain.cl are a few lines that #include the real
+// filter, so editing the real filter did not change their key and a stale
+// binary was reused -- silently, and with no sign beyond wrong results.
+// Depth-capped so a cyclic or deep include graph cannot spin.
+// `required` is set only for the file named on the command line. An include
+// that cannot be read is SKIPPED rather than disabling the cache: include paths
+// are written relative to the including file (lib/immolate.cl says "util.cl",
+// not "lib/util.cl"), so a resolution miss is expected and harmless -- the lib
+// sources are hashed explicitly by the caller either way.
+cl_ulong fnv1a_source_tree(cl_ulong h, const char* path, const char* exe_dir, int* ok, int depth, int required) {
+    size_t n = 0;
+    unsigned char* buf = read_whole_file(path, &n);
+    if (!buf) {
+        if (required) {
+            if (*ok) printf_s("Kernel cache disabled: cannot read %s\n", path);
+            *ok = 0;
+        }
+        return h;
+    }
+    h = fnv1a_str(h, path);
+    h = fnv1a_buf(h, buf, n);
+    if (depth > 0) {
+        const char* p = (const char*)buf;   // read_whole_file NUL-terminates
+        const char* tag = "#include \"";
+        size_t taglen = 10;
+        while ((p = strstr(p, tag)) != NULL) {
+            p += taglen;
+            const char* end = strchr(p, '"');
+            if (!end) break;
+            size_t len = (size_t)(end - p);
+            if (len > 0 && len < 200) {
+                char rel[208];
+                memcpy(rel, p, len);
+                rel[len] = '\0';
+                for (size_t k = 0; k < len; k++) if (rel[k] == '/') rel[k] = PATH_SEPARATOR[0];
+                char inc[MAX_PATH + 256];
+                snprintf(inc, sizeof inc, "%s%s%s", exe_dir, PATH_SEPARATOR, rel);
+                h = fnv1a_source_tree(h, inc, exe_dir, ok, depth - 1, 0);
+            }
+            p = end + 1;
+        }
+    }
+    free(buf);
+    return h;
+}
 cl_ulong fnv1a_device_info(cl_ulong h, cl_device_id device, cl_device_info param) {
     char buf[1024];
     buf[0] = '\0';

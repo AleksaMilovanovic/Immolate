@@ -107,7 +107,7 @@
 #endif
 // 4^10 leaves is already ~1e6 walks of a seed. Past this the seed is parked.
 #ifndef ANN_MAX_BRANCH_POINTS
-#define ANN_MAX_BRANCH_POINTS 10
+#define ANN_MAX_BRANCH_POINTS 14
 #endif
 #define ANN_OVER_BUDGET 1000000000L
 // A cache overflow leaves that seed's score quietly wrong, and it is likeliest
@@ -1267,3 +1267,4 @@ long filter(instance* inst) {
     if (inst->rngCache.reportedOverflow) return ANN_CACHE_OVERFLOW;
     return best;
 }
+// probe
