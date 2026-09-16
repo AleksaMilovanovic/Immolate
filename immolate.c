@@ -1145,6 +1145,10 @@ build_program:
         // "the GPU is only busy half the time" is otherwise a guess: these
         // separate waiting for the device from sorting and writing its output.
         double tSource = 0.0, tPre = 0.0, tEnqueue = 0.0, tDevice = 0.0, tRead = 0.0, tOutput = 0.0;
+        // enqueue split four ways: the blocking hit-count reset, the argument
+        // setup, the launch itself, and the flush that submits it. They look
+        // alike from outside and behave nothing alike.
+        double tReset = 0.0, tArgs = 0.0, tLaunch = 0.0, tFlush = 0.0;
         double tMark = 0.0;
         // Running-mark accounting: each boundary charges the time since the
         // last, so the phases necessarily sum to the loop's wall time. The
@@ -1216,9 +1220,11 @@ build_program:
                                         : (ranksGroupedKernel ? ranksGroupedKernel : ranksKernel);
                     err = clSetKernelArg(k, 1, sizeof(thisBatch), &thisBatch);
                     clErrCheck(err, "clSetKernelArg - Adding number of ranks");
+                    PHASE(tArgs);
                     if (toFile) {
                         err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
                         clErrCheck(err, "clEnqueueWriteBuffer - Resetting hit count");
+                        PHASE(tReset);
                     }
                     // The list is short compared with a batch; do not launch more lanes than there is work.
                     // One group per seed under --group_per_seed; otherwise one
@@ -1235,6 +1241,7 @@ build_program:
                     // failure instead of a halve-and-retry.
                     err = enqueue_1d(queue, k, &listGlobal, &localSize, (unsigned int)listGroups);
                     clErrCheck(err, "clEnqueueNDRangeKernel - Executing ranks kernel");
+                    PHASE(tLaunch);
                     if (toFile) {
                         // Without this the overlap below is a lie: an enqueued
                         // command need not reach the device until a flush or a
@@ -1243,7 +1250,7 @@ build_program:
                         // blocking read -- serialising exactly what this is
                         // meant to overlap.
                         clFlush(queue);
-                        PHASE(tEnqueue);
+                        PHASE(tFlush);
                         FLUSH_PENDING();   // now genuinely concurrent with it
                         PHASE(tOutput);
                         err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
@@ -1259,14 +1266,17 @@ build_program:
                 // Range, collecting (single pass with --to).
                 err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
                 clErrCheck(err, "clEnqueueWriteBuffer - Resetting hit count");
+                PHASE(tReset);
                 err = clSetKernelArg(collectKernel, 0, sizeof(batchStart), &batchStart);
                 clErrCheck(err, "clSetKernelArg - Adding batch start rank");
                 err = clSetKernelArg(collectKernel, 1, sizeof(thisBatch), &thisBatch);
                 clErrCheck(err, "clSetKernelArg - Adding batch size");
+                PHASE(tArgs);
                 err = enqueue_1d(queue, collectKernel, &globalSize, &localSize, numGroups);
                 clErrCheck(err, "clEnqueueNDRangeKernel - Executing collect kernel");
+                PHASE(tLaunch);
                 clFlush(queue);    // submit it before the host goes away; see above
-                PHASE(tEnqueue);
+                PHASE(tFlush);
                 FLUSH_PENDING();   // now genuinely concurrent with it
                 PHASE(tOutput);
                 err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
@@ -1321,10 +1331,10 @@ build_program:
                 // The same split the end-of-run line gives, every batch, so a
                 // long run can be diagnosed without waiting for it to finish.
                 if (toFile) {
-                    double acc = tSource + tPre + tEnqueue + tDevice + tRead + tOutput;
-                    fprintf(stderr, "[src %.1f | pre %.1f | enq %.1f | dev %.1f | readhits %.1f | out %.1f (sort %.1f enc %.1f io %.1f) | other %.1f]\n",
-                            tSource, tPre, tEnqueue, tDevice, tRead, tOutput,
-                            writer.t_sort, writer.t_enc, writer.t_io, elapsed - acc);
+                    double acc = tSource + tPre + tReset + tArgs + tLaunch + tFlush + tDevice + tRead + tOutput;
+                    fprintf(stderr, "[src %.1f | pre %.1f | reset %.1f args %.1f launch %.1f flush %.1f | dev %.1f | readhits %.1f | out %.1f | other %.1f]\n",
+                            tSource, tPre, tReset, tArgs, tLaunch, tFlush, tDevice, tRead, tOutput,
+                            elapsed - acc);
                 }
                 if (twoPass) fprintf(stderr, "[%lld / %lld seeds, %lld survivors, %lld written, %.1fs]\n",
                         (long long)totalIn, (long long)numSeeds, (long long)totalSurvivors, (long long)totalOut, elapsed);
@@ -1338,10 +1348,10 @@ build_program:
         if (twoPass) printf_s("Prefilter passed %lld of %lld seeds.\n", (long long)totalSurvivors, (long long)totalIn);
         if (fromFile) printf_s("Searched %lld seeds from %s.\n", (long long)totalIn, fromFile);
         if (progressEvery > 0 && toFile)
-            printf_s("Time: src %.1f, prefilter %.1f, enqueue %.1f, device %.1f, readhits %.1f, output %.1f (sort %.1f enc %.1f io %.1f), other %.1f.\n",
-                     tSource, tPre, tEnqueue, tDevice, tRead, tOutput,
+            printf_s("Time: src %.1f, prefilter %.1f, reset %.1f, args %.1f, launch %.1f, flush %.1f, device %.1f, readhits %.1f, output %.1f (sort %.1f enc %.1f io %.1f), other %.1f.\n",
+                     tSource, tPre, tReset, tArgs, tLaunch, tFlush, tDevice, tRead, tOutput,
                      writer.t_sort, writer.t_enc, writer.t_io,
-                     (wall_seconds() - wallBegin) - (tSource + tPre + tEnqueue + tDevice + tRead + tOutput));
+                     (wall_seconds() - wallBegin) - (tSource + tPre + tReset + tArgs + tLaunch + tFlush + tDevice + tRead + tOutput));
         if (toFile) {
             if (!sup_writer_close(&writer)) {
                 fprintf_s(stderr, "Failed closing %s.\n", partPath);
