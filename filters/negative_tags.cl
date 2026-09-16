@@ -45,8 +45,13 @@
 // 8KB per work-item and directly limit how many work-items stay resident.
 // Must come before the include; lib/cache.cl sizes the node array there.
 #ifndef CACHE_SIZE
-#define CACHE_SIZE 64
+#define CACHE_SIZE 32
 #endif
+// This filter never touches the deck path, so drop the 52-item starting deck
+// from every work-item's instance. That is 208 bytes, and more to the point it
+// removes a 52-element write loop from i_init that ran once per seed. The
+// instance lives in local memory on NVIDIA, so its size is occupancy.
+#define INSTANCE_NO_DECK
 #define FILTER_USES_CUTOFF
 #include "lib/immolate.cl"
 
@@ -82,7 +87,9 @@ long filter(instance* inst, long cutoff) {
         // reasoning, as the ante-local cache in deep_negative_shops.
         inst->rngCache.nextFreeNode = 0;
         inst->rngCache.lastNode = -1;
-        init_unlocks(inst, ante, false);
+        // init_unlocks only acts on antes 2-6; past that it is a call and five
+        // comparisons to do nothing, 32 times per seed.
+        if (ante <= 6) init_unlocks(inst, ante, false);
         if (next_tag(inst, ante) == Negative_Tag) negativeTags1++;
 #ifndef NT_FIRST_SLOT_ONLY
         if (next_tag(inst, ante) == Negative_Tag) negativeTags2++;

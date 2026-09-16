@@ -11,7 +11,11 @@
 // and init_unlocks lifts them on schedule (all of them by ante 6), then
 // JT_LOCKED_TAGS is the profile's own unearned tags -- edit it to match your
 // profile, or leave it empty ({}) for a completed one.
-#define CACHE_SIZE 64
+#ifndef CACHE_SIZE
+#define CACHE_SIZE 32
+#endif
+// No deck path here either; see the note in negative_tags.cl.
+#define INSTANCE_NO_DECK
 #include "lib/immolate.cl"
 
 #ifndef JT_ANTE
