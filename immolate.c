@@ -1302,7 +1302,18 @@ build_program:
             }
             batches++;
             if (progressEvery > 0 && batches % progressEvery == 0) {
-                double elapsed = (double)(clock() - begin) / CLOCKS_PER_SEC;
+                // Wall time, not clock(): clock() is process CPU summed over
+                // threads, so on a CPU device it reads several times the real
+                // elapsed time, and now that the host does real work during a
+                // batch instead of spinning in clFinish it overstates on a GPU
+                // too. wallBegin is the same origin the final report uses.
+                double elapsed = wall_seconds() - wallBegin;
+                // The same split the end-of-run line gives, every batch, so a
+                // long run can be diagnosed without waiting for it to finish.
+                if (toFile)
+                    fprintf(stderr, "[device %.1fs, output %.1fs, %.0f%% of output hidden]\n",
+                            tDevice, tOutput,
+                            tOutput > 0 ? 100.0 * (1.0 - tOutput / (tDevice + tOutput)) : 100.0);
                 if (twoPass) fprintf(stderr, "[%lld / %lld seeds, %lld survivors, %lld written, %.1fs]\n",
                         (long long)totalIn, (long long)numSeeds, (long long)totalSurvivors, (long long)totalOut, elapsed);
                 else fprintf(stderr, "[%lld seeds, %lld written, %.1fs]\n", (long long)totalIn, (long long)totalOut, elapsed);
