@@ -25,7 +25,7 @@
       "tags": ["chain"],
       "filter": "bench_chain_inst",
       "seed": "11111111",
-      "count": {"pocl": 300000, "rtx5080": 5000000},
+      "count": {"pocl": 300000, "rtx5080": 60000000},
       "cutoff": 9999
     },
     {
@@ -34,7 +34,7 @@
       "tags": ["chain"],
       "filter": "bench_chain_regs",
       "seed": "11111111",
-      "count": {"pocl": 300000, "rtx5080": 5000000},
+      "count": {"pocl": 300000, "rtx5080": 60000000},
       "cutoff": 9999,
       "compare_to": "chain-inst-baseline"
     }
