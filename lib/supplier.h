@@ -104,6 +104,7 @@ typedef struct SupplierWriter {
     size_t enc_cap;
     int64_t* sortbuf;      // radix scratch, grown to the largest batch seen
     size_t sortbuf_cap;
+    double t_sort, t_enc, t_io;   // where append() spends its time
 } sup_writer;
 
 // LSD radix sort over 6 bytes, for the ranks of one batch.
@@ -167,8 +168,15 @@ static int sup_writer_open(sup_writer* w, const char* path, const char* filter, 
 // atomic order) but every rank must exceed everything already in the file,
 // which holds when batches are walked in ascending rank order. Sorts in place.
 // Returns 0 on I/O error or ordering violation.
+static double sup_now(void) {
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 static int sup_writer_append(sup_writer* w, int64_t* ranks, size_t n) {
     if (n == 0) return 1;
+    double _t0 = sup_now();
     // Radix when the scratch can be had, qsort otherwise: same ordering either
     // way, so a failed allocation costs speed and nothing else.
     if (w->sortbuf_cap < n) {
@@ -178,6 +186,8 @@ static int sup_writer_append(sup_writer* w, int64_t* ranks, size_t n) {
     }
     if (w->sortbuf) sup_radix_sort(ranks, w->sortbuf, n);
     else qsort(ranks, n, sizeof ranks[0], sup_cmp_long);
+    double _t1 = sup_now();
+    w->t_sort += _t1 - _t0;
     if (ranks[0] <= w->prev) {
         fprintf(stderr, "Seed-supplier file: rank %lld is not above the last written rank %lld; batches must be ascending.\n", (long long)ranks[0], (long long)w->prev);
         return 0;
@@ -197,10 +207,13 @@ static int sup_writer_append(sup_writer* w, int64_t* ranks, size_t n) {
         while (d >= 0x80) { w->enc[len++] = (unsigned char)(d | 0x80); d >>= 7; }
         w->enc[len++] = (unsigned char)d;
     }
+    double _t2 = sup_now();
+    w->t_enc += _t2 - _t1;
     if (fwrite(w->enc, 1, len, w->f) != len) return 0;
     // Push every batch to the OS at once: a killed run then loses nothing and
     // leaves no partial record for --resume to trim.
     if (fflush(w->f) != 0) return 0;
+    w->t_io += sup_now() - _t2;
     w->prev = prev;
     w->count += n;
     return 1;

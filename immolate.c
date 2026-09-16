@@ -1144,23 +1144,28 @@ build_program:
         // Where a run's wall time goes. Printed with --progress, because
         // "the GPU is only busy half the time" is otherwise a guess: these
         // separate waiting for the device from sorting and writing its output.
-        double tDevice = 0.0, tOutput = 0.0;
+        double tSource = 0.0, tPre = 0.0, tEnqueue = 0.0, tDevice = 0.0, tRead = 0.0, tOutput = 0.0;
+        double tMark = 0.0;
+        // Running-mark accounting: each boundary charges the time since the
+        // last, so the phases necessarily sum to the loop's wall time. The
+        // earlier timers wrapped only two blocking points and left most of a
+        // run unattributed, which is exactly the thing that needed finding.
+        #define PHASE(acc) do { double _n = wall_seconds(); (acc) += _n - tMark; tMark = _n; } while (0)
         // Writes the batch held from last time. Kept a macro so it can sit in
         // the one spot that matters -- between enqueueing a batch and blocking
         // on it -- without threading half the loop's locals through a call.
         #define FLUSH_PENDING() do { \
             if (pendHits > 0) { \
-                double _t0 = wall_seconds(); \
                 if (!sup_writer_append(&writer, (int64_t*)pendRanks, pendHits)) { \
                     fprintf_s(stderr, "Failed writing to %s.\n", toFile); \
                     exit(EXIT_FAILURE); \
                 } \
                 totalOut += pendHits; \
                 pendHits = 0; \
-                tOutput += wall_seconds() - _t0; \
             } \
         } while (0)
         const cl_uint zero = 0;
+        tMark = wall_seconds();
         for (;;) {
             // ---- Source: fill either a range or listBuf for this batch ----
             cl_long thisBatch = 0;   // range size, or list length
@@ -1178,6 +1183,7 @@ build_program:
                 err = clEnqueueWriteBuffer(queue, listBuf, CL_TRUE, 0, sizeof(cl_long) * got, hostRanks, 0, NULL, NULL);
                 clErrCheck(err, "clEnqueueWriteBuffer - Uploading seed list chunk");
                 haveList = 1;
+                PHASE(tSource);
             } else {
                 if (totalIn >= numSeeds) break;
                 thisBatch = numSeeds - totalIn < batchCap ? numSeeds - totalIn : batchCap;
@@ -1194,6 +1200,7 @@ build_program:
                     cl_uint survivors = 0;
                     err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(survivors), &survivors, 0, NULL, NULL);
                     clErrCheck(err, "clEnqueueReadBuffer - Reading survivor count");
+                    PHASE(tPre);
                     totalSurvivors += survivors;
                     totalIn += thisBatch;
                     thisBatch = survivors;
@@ -1236,11 +1243,12 @@ build_program:
                         // blocking read -- serialising exactly what this is
                         // meant to overlap.
                         clFlush(queue);
+                        PHASE(tEnqueue);
                         FLUSH_PENDING();   // now genuinely concurrent with it
-                        double _tw = wall_seconds();
+                        PHASE(tOutput);
                         err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
-                        tDevice += wall_seconds() - _tw;
                         clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
+                        PHASE(tDevice);
                     } else {
                         err = clFinish(queue);
                         clErrCheck(err, "clFinish - Waiting for ranks kernel");
@@ -1258,11 +1266,12 @@ build_program:
                 err = enqueue_1d(queue, collectKernel, &globalSize, &localSize, numGroups);
                 clErrCheck(err, "clEnqueueNDRangeKernel - Executing collect kernel");
                 clFlush(queue);    // submit it before the host goes away; see above
+                PHASE(tEnqueue);
                 FLUSH_PENDING();   // now genuinely concurrent with it
-                double _tw = wall_seconds();
+                PHASE(tOutput);
                 err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
-                tDevice += wall_seconds() - _tw;
                 clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
+                PHASE(tDevice);
                 totalIn += thisBatch;
             }
 
@@ -1271,6 +1280,7 @@ build_program:
                 cl_long* dst = pendRanks ? pendRanks : hostRanks;
                 err = clEnqueueReadBuffer(queue, outBuf, CL_TRUE, 0, sizeof(cl_long) * hits, dst, 0, NULL, NULL);
                 clErrCheck(err, "clEnqueueReadBuffer - Reading collected ranks");
+                PHASE(tRead);
                 if (pendRanks) {
                     pendHits = hits;   // written once the next batch is running
                 } else {
@@ -1310,10 +1320,12 @@ build_program:
                 double elapsed = wall_seconds() - wallBegin;
                 // The same split the end-of-run line gives, every batch, so a
                 // long run can be diagnosed without waiting for it to finish.
-                if (toFile)
-                    fprintf(stderr, "[device %.1fs, output %.1fs, %.0f%% of output hidden]\n",
-                            tDevice, tOutput,
-                            tOutput > 0 ? 100.0 * (1.0 - tOutput / (tDevice + tOutput)) : 100.0);
+                if (toFile) {
+                    double acc = tSource + tPre + tEnqueue + tDevice + tRead + tOutput;
+                    fprintf(stderr, "[src %.1f | pre %.1f | enq %.1f | dev %.1f | readhits %.1f | out %.1f (sort %.1f enc %.1f io %.1f) | other %.1f]\n",
+                            tSource, tPre, tEnqueue, tDevice, tRead, tOutput,
+                            writer.t_sort, writer.t_enc, writer.t_io, elapsed - acc);
+                }
                 if (twoPass) fprintf(stderr, "[%lld / %lld seeds, %lld survivors, %lld written, %.1fs]\n",
                         (long long)totalIn, (long long)numSeeds, (long long)totalSurvivors, (long long)totalOut, elapsed);
                 else fprintf(stderr, "[%lld seeds, %lld written, %.1fs]\n", (long long)totalIn, (long long)totalOut, elapsed);
@@ -1326,8 +1338,10 @@ build_program:
         if (twoPass) printf_s("Prefilter passed %lld of %lld seeds.\n", (long long)totalSurvivors, (long long)totalIn);
         if (fromFile) printf_s("Searched %lld seeds from %s.\n", (long long)totalIn, fromFile);
         if (progressEvery > 0 && toFile)
-            printf_s("Time: %.1fs blocked on the device, %.1fs sorting and writing output (%.0f%% of it hidden behind the device).\n",
-                     tDevice, tOutput, tOutput > 0 ? 100.0 * (1.0 - tOutput / (tDevice + tOutput)) : 100.0);
+            printf_s("Time: src %.1f, prefilter %.1f, enqueue %.1f, device %.1f, readhits %.1f, output %.1f (sort %.1f enc %.1f io %.1f), other %.1f.\n",
+                     tSource, tPre, tEnqueue, tDevice, tRead, tOutput,
+                     writer.t_sort, writer.t_enc, writer.t_io,
+                     (wall_seconds() - wallBegin) - (tSource + tPre + tEnqueue + tDevice + tRead + tOutput));
         if (toFile) {
             if (!sup_writer_close(&writer)) {
                 fprintf_s(stderr, "Failed closing %s.\n", partPath);
