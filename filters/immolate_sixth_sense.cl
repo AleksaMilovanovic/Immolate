@@ -59,10 +59,10 @@ __constant item SS_UNLOCKED_RARES[] = {};
 #define SS_TRIGGERS 2
 #endif
 #ifndef SS_SEANCE_TRIGGERS
-#define SS_SEANCE_TRIGGERS 4
+#define SS_SEANCE_TRIGGERS 3
 #endif
 #ifndef SS_MAX_ANTE
-#define SS_MAX_ANTE 4
+#define SS_MAX_ANTE 3
 #endif
 #ifndef SS_SHOP_ANTE1
 #define SS_SHOP_ANTE1 4

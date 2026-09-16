@@ -107,7 +107,7 @@
 #endif
 // 4^10 leaves is already ~1e6 walks of a seed. Past this the seed is parked.
 #ifndef ANN_MAX_BRANCH_POINTS
-#define ANN_MAX_BRANCH_POINTS 14
+#define ANN_MAX_BRANCH_POINTS 15
 #endif
 #if defined(ANN_EXPLAIN) && defined(GROUP_PER_SEED)
 // Every lane would run the printout for its own share of the tree, so the

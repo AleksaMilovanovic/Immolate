@@ -21,7 +21,7 @@
 #ifndef JT_ANTE
 #define JT_ANTE 39
 #endif
-__constant item JT_LOCKED_TAGS[] = { Foil_Tag, Holographic_Tag, Polychrome_Tag };
+__constant item JT_LOCKED_TAGS[] = {};
 
 long filter(instance* inst) {
     init_locks(inst, 1, false, false);
