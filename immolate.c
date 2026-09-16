@@ -1141,17 +1141,23 @@ build_program:
         cl_long totalSurvivors = 0; // pass-1 survivors (two-pass only)
         cl_long totalOut = 0;       // seeds written to --to
         int batches = 0;
+        // Where a run's wall time goes. Printed with --progress, because
+        // "the GPU is only busy half the time" is otherwise a guess: these
+        // separate waiting for the device from sorting and writing its output.
+        double tDevice = 0.0, tOutput = 0.0;
         // Writes the batch held from last time. Kept a macro so it can sit in
         // the one spot that matters -- between enqueueing a batch and blocking
         // on it -- without threading half the loop's locals through a call.
         #define FLUSH_PENDING() do { \
             if (pendHits > 0) { \
+                double _t0 = wall_seconds(); \
                 if (!sup_writer_append(&writer, (int64_t*)pendRanks, pendHits)) { \
                     fprintf_s(stderr, "Failed writing to %s.\n", toFile); \
                     exit(EXIT_FAILURE); \
                 } \
                 totalOut += pendHits; \
                 pendHits = 0; \
+                tOutput += wall_seconds() - _t0; \
             } \
         } while (0)
         const cl_uint zero = 0;
@@ -1223,8 +1229,17 @@ build_program:
                     err = enqueue_1d(queue, k, &listGlobal, &localSize, (unsigned int)listGroups);
                     clErrCheck(err, "clEnqueueNDRangeKernel - Executing ranks kernel");
                     if (toFile) {
-                        FLUSH_PENDING();   // overlaps the kernel just enqueued
+                        // Without this the overlap below is a lie: an enqueued
+                        // command need not reach the device until a flush or a
+                        // blocking call, so the driver is free to sit on the
+                        // kernel while the host sorts and only start it at the
+                        // blocking read -- serialising exactly what this is
+                        // meant to overlap.
+                        clFlush(queue);
+                        FLUSH_PENDING();   // now genuinely concurrent with it
+                        double _tw = wall_seconds();
                         err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
+                        tDevice += wall_seconds() - _tw;
                         clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
                     } else {
                         err = clFinish(queue);
@@ -1242,8 +1257,11 @@ build_program:
                 clErrCheck(err, "clSetKernelArg - Adding batch size");
                 err = enqueue_1d(queue, collectKernel, &globalSize, &localSize, numGroups);
                 clErrCheck(err, "clEnqueueNDRangeKernel - Executing collect kernel");
-                FLUSH_PENDING();   // overlaps the kernel just enqueued
+                clFlush(queue);    // submit it before the host goes away; see above
+                FLUSH_PENDING();   // now genuinely concurrent with it
+                double _tw = wall_seconds();
                 err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
+                tDevice += wall_seconds() - _tw;
                 clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
                 totalIn += thisBatch;
             }
@@ -1296,6 +1314,9 @@ build_program:
         #undef FLUSH_PENDING
         if (twoPass) printf_s("Prefilter passed %lld of %lld seeds.\n", (long long)totalSurvivors, (long long)totalIn);
         if (fromFile) printf_s("Searched %lld seeds from %s.\n", (long long)totalIn, fromFile);
+        if (progressEvery > 0 && toFile)
+            printf_s("Time: %.1fs blocked on the device, %.1fs sorting and writing output (%.0f%% of it hidden behind the device).\n",
+                     tDevice, tOutput, tOutput > 0 ? 100.0 * (1.0 - tOutput / (tDevice + tOutput)) : 100.0);
         if (toFile) {
             if (!sup_writer_close(&writer)) {
                 fprintf_s(stderr, "Failed closing %s.\n", partPath);
