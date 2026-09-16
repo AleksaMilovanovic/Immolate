@@ -1090,6 +1090,20 @@ build_program:
             hostRanks = (cl_long*)malloc(sizeof(cl_long) * (size_t)batchSeeds);
             if (!hostRanks) { fprintf_s(stderr, "Out of memory for a %lld-seed batch; lower --batch.\n", (long long)batchSeeds); exit(EXIT_FAILURE); }
         }
+        // A batch's hits are sorted and encoded on the host, which for a
+        // permissive filter is far more time than the kernel itself -- and the
+        // loop is otherwise strictly serial, so the device sits idle throughout.
+        // Holding them here lets that work happen AFTER the next batch is
+        // enqueued, so it overlaps the device instead of blocking it. Under
+        // --from, hostRanks is also the source staging and is overwritten by the
+        // next batch, which is why this is a second buffer rather than a flag.
+        cl_long* pendRanks = NULL;
+        cl_uint pendHits = 0;
+        if (toFile) {
+            pendRanks = (cl_long*)malloc(sizeof(cl_long) * (size_t)batchSeeds);
+            // Not fatal: without it the writes simply stay synchronous.
+            if (!pendRanks) printf_s("Note: no memory for overlapped output; writing synchronously.\n");
+        }
         // Pass 1 (prefilter) reads a range, writes survivors to listBuf.
         if (twoPass) {
             err = clSetKernelArg(preKernel, 2, sizeof(cl_mem), &listBuf);
@@ -1127,6 +1141,19 @@ build_program:
         cl_long totalSurvivors = 0; // pass-1 survivors (two-pass only)
         cl_long totalOut = 0;       // seeds written to --to
         int batches = 0;
+        // Writes the batch held from last time. Kept a macro so it can sit in
+        // the one spot that matters -- between enqueueing a batch and blocking
+        // on it -- without threading half the loop's locals through a call.
+        #define FLUSH_PENDING() do { \
+            if (pendHits > 0) { \
+                if (!sup_writer_append(&writer, (int64_t*)pendRanks, pendHits)) { \
+                    fprintf_s(stderr, "Failed writing to %s.\n", toFile); \
+                    exit(EXIT_FAILURE); \
+                } \
+                totalOut += pendHits; \
+                pendHits = 0; \
+            } \
+        } while (0)
         const cl_uint zero = 0;
         for (;;) {
             // ---- Source: fill either a range or listBuf for this batch ----
@@ -1196,6 +1223,7 @@ build_program:
                     err = enqueue_1d(queue, k, &listGlobal, &localSize, (unsigned int)listGroups);
                     clErrCheck(err, "clEnqueueNDRangeKernel - Executing ranks kernel");
                     if (toFile) {
+                        FLUSH_PENDING();   // overlaps the kernel just enqueued
                         err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
                         clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
                     } else {
@@ -1214,6 +1242,7 @@ build_program:
                 clErrCheck(err, "clSetKernelArg - Adding batch size");
                 err = enqueue_1d(queue, collectKernel, &globalSize, &localSize, numGroups);
                 clErrCheck(err, "clEnqueueNDRangeKernel - Executing collect kernel");
+                FLUSH_PENDING();   // overlaps the kernel just enqueued
                 err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
                 clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
                 totalIn += thisBatch;
@@ -1221,14 +1250,22 @@ build_program:
 
             // ---- Sink: append this batch's hits to the supplier file ----
             if (toFile && hits > 0) {
-                err = clEnqueueReadBuffer(queue, outBuf, CL_TRUE, 0, sizeof(cl_long) * hits, hostRanks, 0, NULL, NULL);
+                cl_long* dst = pendRanks ? pendRanks : hostRanks;
+                err = clEnqueueReadBuffer(queue, outBuf, CL_TRUE, 0, sizeof(cl_long) * hits, dst, 0, NULL, NULL);
                 clErrCheck(err, "clEnqueueReadBuffer - Reading collected ranks");
-                if (!sup_writer_append(&writer, (int64_t*)hostRanks, hits)) {
-                    fprintf_s(stderr, "Failed writing to %s.\n", toFile);
-                    exit(EXIT_FAILURE);
+                if (pendRanks) {
+                    pendHits = hits;   // written once the next batch is running
+                } else {
+                    if (!sup_writer_append(&writer, (int64_t*)hostRanks, hits)) {
+                        fprintf_s(stderr, "Failed writing to %s.\n", toFile);
+                        exit(EXIT_FAILURE);
+                    }
+                    totalOut += hits;
                 }
-                totalOut += hits;
             }
+            // A held batch belongs to the part that was open when it was
+            // collected, so it has to land before the writer moves on.
+            if (toFile && toParts > 1 && totalIn >= partEnd) FLUSH_PENDING();
             // Part boundary reached: close this part and open the next.
             if (toFile && toParts > 1 && totalIn >= partEnd && totalIn < numSeeds && partIndex < toParts) {
                 if (!sup_writer_close(&writer)) {
@@ -1255,6 +1292,8 @@ build_program:
             }
         }
         err = clFinish(queue);
+        FLUSH_PENDING();   // the last batch is still held
+        #undef FLUSH_PENDING
         if (twoPass) printf_s("Prefilter passed %lld of %lld seeds.\n", (long long)totalSurvivors, (long long)totalIn);
         if (fromFile) printf_s("Searched %lld seeds from %s.\n", (long long)totalIn, fromFile);
         if (toFile) {
@@ -1269,6 +1308,7 @@ build_program:
         }
         if (fromFile) sup_multi_close(&reader);
         free(hostRanks);
+        free(pendRanks);
         clReleaseMemObject(listBuf);
         if (outBuf) clReleaseMemObject(outBuf);
         clReleaseMemObject(countBuf);

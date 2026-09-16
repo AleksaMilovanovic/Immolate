@@ -102,7 +102,38 @@ typedef struct SupplierWriter {
     uint64_t count;
     unsigned char* enc;    // scratch for one batch's encoded bytes
     size_t enc_cap;
+    int64_t* sortbuf;      // radix scratch, grown to the largest batch seen
+    size_t sortbuf_cap;
 } sup_writer;
+
+// LSD radix sort over 6 bytes, for the ranks of one batch.
+//
+// qsort was the single biggest cost in a write-heavy run: 224 ms for a 3.2M-hit
+// batch, all of it on the host with the GPU stopped. Ranks are non-negative and
+// below 2^41 (s_from_rank's domain), so six 8-bit passes cover them, and six is
+// even -- the ping-pong lands back in `a` with no final copy. A pass whose keys
+// all share the same byte is skipped, which is the common case for the high
+// bytes since one batch spans at most --batch ranks; `moved` tracks parity so a
+// skipped pass cannot leave the result in the scratch buffer.
+//
+// Returns 0 if the scratch allocation fails, so the caller can fall back.
+static int sup_radix_sort(int64_t* a, int64_t* tmp, size_t n) {
+    if (n < 2) return 1;
+    int moved = 0;
+    for (int shift = 0; shift < 48; shift += 8) {
+        size_t count[256];
+        memset(count, 0, sizeof count);
+        for (size_t i = 0; i < n; i++) count[(size_t)((a[i] >> shift) & 0xFF)]++;
+        if (count[(size_t)((a[0] >> shift) & 0xFF)] == n) continue;  // one bucket
+        size_t run = 0;
+        for (int k = 0; k < 256; k++) { size_t c = count[k]; count[k] = run; run += c; }
+        for (size_t i = 0; i < n; i++) tmp[count[(size_t)((a[i] >> shift) & 0xFF)]++] = a[i];
+        int64_t* swap = a; a = tmp; tmp = swap;
+        moved ^= 1;
+    }
+    if (moved) memcpy(tmp, a, n * sizeof *a);   // odd number of passes: copy back
+    return 1;
+}
 
 static int sup_cmp_long(const void* a, const void* b) {
     int64_t x = *(const int64_t*)a, y = *(const int64_t*)b;
@@ -138,7 +169,15 @@ static int sup_writer_open(sup_writer* w, const char* path, const char* filter, 
 // Returns 0 on I/O error or ordering violation.
 static int sup_writer_append(sup_writer* w, int64_t* ranks, size_t n) {
     if (n == 0) return 1;
-    qsort(ranks, n, sizeof ranks[0], sup_cmp_long);
+    // Radix when the scratch can be had, qsort otherwise: same ordering either
+    // way, so a failed allocation costs speed and nothing else.
+    if (w->sortbuf_cap < n) {
+        free(w->sortbuf);
+        w->sortbuf = (int64_t*)malloc(n * sizeof *w->sortbuf);
+        w->sortbuf_cap = w->sortbuf ? n : 0;
+    }
+    if (w->sortbuf) sup_radix_sort(ranks, w->sortbuf, n);
+    else qsort(ranks, n, sizeof ranks[0], sup_cmp_long);
     if (ranks[0] <= w->prev) {
         fprintf(stderr, "Seed-supplier file: rank %lld is not above the last written rank %lld; batches must be ascending.\n", (long long)ranks[0], (long long)w->prev);
         return 0;
@@ -180,6 +219,9 @@ static int sup_writer_close(sup_writer* w) {
     }
     free(w->enc);
     w->enc = NULL;
+    free(w->sortbuf);
+    w->sortbuf = NULL;
+    w->sortbuf_cap = 0;
     return ok;
 }
 
