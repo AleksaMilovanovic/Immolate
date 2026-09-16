@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "profiles": {
+    "smoke": ["chain"],
+    "quick": ["chain"],
+    "correctness": ["chain"],
+    "breadth": ["chain"],
+    "benchmark": ["chain"],
+    "all": ["chain"]
+  },
+  "scales": {
+    "pocl": {
+      "batch": 65536,
+      "benchmark_repeats": 5
+    },
+    "rtx5080": {
+      "batch": 1048576,
+      "benchmark_repeats": 7
+    }
+  },
+  "cases": [
+    {
+      "id": "chain-inst-baseline",
+      "kind": "benchmark",
+      "tags": ["chain"],
+      "filter": "bench_chain_inst",
+      "seed": "11111111",
+      "count": {"pocl": 300000, "rtx5080": 5000000},
+      "cutoff": 9999
+    },
+    {
+      "id": "chain-regs-candidate",
+      "kind": "benchmark",
+      "tags": ["chain"],
+      "filter": "bench_chain_regs",
+      "seed": "11111111",
+      "count": {"pocl": 300000, "rtx5080": 5000000},
+      "cutoff": 9999,
+      "compare_to": "chain-inst-baseline"
+    }
+  ]
+}
