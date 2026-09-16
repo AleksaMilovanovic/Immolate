@@ -61,6 +61,89 @@
 __constant item NT_LOCKED_TAGS[] = { Foil_Tag, Holographic_Tag, Polychrome_Tag };
 #define NT_NUM_LOCKED_TAGS (sizeof(NT_LOCKED_TAGS) / sizeof(NT_LOCKED_TAGS[0]))
 
+// ---------------------------------------------------------------------------
+// NT_FAST_TAGS: tag draws with nothing in local memory.
+//
+// The lib path routes every draw through the node cache -- scan for the node,
+// create it, read and write its state -- and also reads hashedSeed, locked[]
+// and inst->rng. `instance` does not fit in registers, so on a GPU every one of
+// those is a local-memory round trip: about six per draw, ~230 per seed, and at
+// 10M seeds/s that latency is the whole cost, not the arithmetic.
+//
+// None of it is needed here. With NT_FIRST_SLOT_ONLY an ante draws its tag node
+// exactly once and never touches it again, so the node's state can be built in
+// a register, used, and thrown away. The locked-tag test becomes a bit test on
+// an index mask instead of a locked[] read.
+//
+// Two guards keep this exact rather than approximate:
+//   - It REQUIRES NT_FIRST_SLOT_ONLY. With both slots drawn, the two draws
+//     share one node and the second must continue the first's advanced state;
+//     holding that per depth is the array this exists to avoid.
+//   - Antes 1-6 keep the lib path. init_locks/init_unlocks open the ante-gated
+//     tags on a schedule there, so the lock set is not yet just the profile's.
+//     From ante 7 it is, and 32 of the 38 antes take the fast path.
+#ifdef NT_FAST_TAGS
+#ifndef NT_FIRST_SLOT_ONLY
+#error "NT_FAST_TAGS requires NT_FIRST_SLOT_ONLY; see the note above"
+#endif
+#if NT_MAX_ANTE > 99
+#error "NT_FAST_TAGS assumes a 1- or 2-digit ante"
+#endif
+
+// The seed's hash prefix depends on the node name only through its LENGTH, and
+// a tag node takes just two lengths (1- and 2-digit antes). Two registers hold
+// them, which is what the lib keeps in seedHashByLen -- an array in memory.
+typedef struct NtHashCache { int len0, len1; double h0, h1; } nt_hash_cache;
+
+inline double nt_seed_prefix(seed* sd, int nameLen) {
+    int pos = nameLen + sd->len;
+    double h = 1;
+    for (int i = sd->len - 1; i >= 0; i--) h = ph_step(h, s_char_at(sd, i), pos--);
+    return h;
+}
+
+// Initial state of the tag node for this ante, or its resample node at `depth`.
+// Same construction as rng_node_resolve: the seed first, then the name's
+// components in reverse order.
+inline double nt_node_state(seed* sd, __constant char* src, int srcLen,
+                            int ante, int depth, nt_hash_cache* hc) {
+    int nameLen = 3 + srcLen + dec_len(ante) + (depth ? 9 + dec_len(depth + 1) : 0);
+    double h;
+    if (depth == 0 && nameLen == hc->len0)      h = hc->h0;
+    else if (depth == 0 && nameLen == hc->len1) h = hc->h1;
+    else {
+        h = nt_seed_prefix(sd, nameLen);
+        // Only the two base-node lengths are worth keeping; resample lengths
+        // vary and would evict them for a 1-in-8 event.
+        if (depth == 0) { if (hc->len0 < 0) { hc->len0 = nameLen; hc->h0 = h; }
+                          else if (hc->len1 < 0) { hc->len1 = nameLen; hc->h1 = h; } }
+    }
+    int pos = nameLen;
+    if (depth) { h = ph_decimal_rev(h, &pos, depth + 1); h = ph_cstr_rev(h, &pos, "_resample", 9); }
+    h = ph_decimal_rev(h, &pos, ante);
+    h = ph_cstr_rev(h, &pos, src, srcLen);
+    h = ph_cstr_rev(h, &pos, "Tag", 3);
+    return h;
+}
+
+inline item nt_fast_tag(instance* inst, int ante, nt_hash_cache* hc,
+                        __constant char* src, int srcLen, uint lockedMask) {
+    double hashedSeed = inst->hashedSeed;
+    int count = (int)TAGS[0];
+    double st = nt_node_state(&inst->seed, src, srcLen, ante, 0, hc);
+    st = roundDigits(fract(st * 1.72431234 + 2.134453429141), 13);
+    lrandom rng = randomseed((st + hashedSeed) / 2);
+    int idx = (int)l_randint(&rng, 1, count);
+    for (int depth = 1; (lockedMask >> (idx - 1)) & 1u; depth++) {
+        double rs = nt_node_state(&inst->seed, src, srcLen, ante, depth, hc);
+        rs = roundDigits(fract(rs * 1.72431234 + 2.134453429141), 13);
+        rng = randomseed((rs + hashedSeed) / 2);
+        idx = (int)l_randint(&rng, 1, count);
+    }
+    return TAGS[idx];
+}
+#endif // NT_FAST_TAGS
+
 long filter(instance* inst, long cutoff) {
     init_locks(inst, 1, false, false);
     for (int i = 0; i < (int)NT_NUM_LOCKED_TAGS; i++) i_lock(inst, NT_LOCKED_TAGS[i]);
@@ -70,6 +153,19 @@ long filter(instance* inst, long cutoff) {
     long need2 = cutoff > 0 ? cutoff % 100 : 0;
     long negativeTags1 = 0;
     long negativeTags2 = 0;
+#ifdef NT_FAST_TAGS
+    // Built once per seed and held in registers for the whole ante loop.
+    nt_hash_cache hashCache; hashCache.len0 = -1; hashCache.len1 = -1;
+    hashCache.h0 = 0; hashCache.h1 = 0;
+    int srcLen = 0;
+    __constant char* srcStr = source_cstr(S_Null, &srcLen);
+    // Which TAGS indices are locked, as a bit mask: TAGS holds 24 entries, so
+    // the whole lock test fits in one register instead of a locked[] read.
+    uint lockedMask = 0;
+    for (int i = 1; i <= (int)TAGS[0]; i++)
+        for (int k = 0; k < (int)NT_NUM_LOCKED_TAGS; k++)
+            if (TAGS[i] == NT_LOCKED_TAGS[k]) lockedMask |= 1u << (i - 1);
+#endif
     for (int ante = 1; ante <= NT_MAX_ANTE; ante++) {
         if (cutoff > 0) {
             // Passed: first-slot target met, and the second-slot one too if the
@@ -90,7 +186,13 @@ long filter(instance* inst, long cutoff) {
         // init_unlocks only acts on antes 2-6; past that it is a call and five
         // comparisons to do nothing, 32 times per seed.
         if (ante <= 6) init_unlocks(inst, ante, false);
+#ifdef NT_FAST_TAGS
+        item tag = ante <= 6 ? next_tag(inst, ante)
+                             : nt_fast_tag(inst, ante, &hashCache, srcStr, srcLen, lockedMask);
+        if (tag == Negative_Tag) negativeTags1++;
+#else
         if (next_tag(inst, ante) == Negative_Tag) negativeTags1++;
+#endif
 #ifndef NT_FIRST_SLOT_ONLY
         if (next_tag(inst, ante) == Negative_Tag) negativeTags2++;
 #endif
