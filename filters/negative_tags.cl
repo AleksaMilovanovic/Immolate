@@ -13,6 +13,15 @@
 // a LOWER BOUND, not the full count: rerun the survivors with -c 0 to get exact
 // totals. With -c 0 nothing is ever decided early and every ante is drawn.
 //
+// NT_FIRST_SLOT_ONLY drops the second tag draw of every ante, halving the work.
+// A cutoff like -c 400 asks for four FIRST-slot tags and no second-slot ones,
+// so the second draw is computed and thrown away. Skipping it is exact for the
+// first-slot count: the two draws share one ante-keyed node, and nothing from
+// that node is read in any later ante, so a skipped draw cannot shift anything.
+// The reported second-slot field is then 0 rather than the true count -- the
+// score is already a lower bound whenever the cutoff decides early, and this
+// makes the second field one too. Rerun survivors with -c 0 for exact totals.
+//
 // Meant for pools: `immolate -f negative_tags -c 400 --from perkeo.seeds` runs
 // only over seeds that already passed early_ante_perkeo. It works over a plain
 // range too, but every seed then pays for up to NT_MAX_ANTE * 2 tag draws.
@@ -29,10 +38,15 @@
 // unlocked. Note init_unlocks(ante 2) re-enables Negative Tag; the list below
 // is re-applied every ante so it is never undone by that.
 //
-// Each locked tag that comes up costs a resample node per ante and reroll
-// depth: 38 antes x 2 tags with three tags locked exceeds the default 64.
+// With the per-ante cache reset below, only one ante's nodes are ever live: two
+// tag draws plus their resample chains, which with three tags locked is a
+// handful. 64 is already generous. This is not just headroom -- the node array
+// is the bulk of `instance`, which lives in private memory, so 512 slots cost
+// 8KB per work-item and directly limit how many work-items stay resident.
 // Must come before the include; lib/cache.cl sizes the node array there.
-#define CACHE_SIZE 512
+#ifndef CACHE_SIZE
+#define CACHE_SIZE 64
+#endif
 #define FILTER_USES_CUTOFF
 #include "lib/immolate.cl"
 
@@ -59,9 +73,20 @@ long filter(instance* inst, long cutoff) {
             // Failed: even a Negative Tag in every remaining first slot falls short.
             if (negativeTags1 + (NT_MAX_ANTE - ante + 1) < need1) break;
         }
+        // Every node this filter touches is ante-keyed -- the tag node and its
+        // resample chain are (R_Tags, S_Null, ante[, depth]) -- so nothing from
+        // an earlier ante is ever read again. Discarding the slots keeps
+        // rng_node_resolve's LINEAR SCAN to the handful of nodes that are live,
+        // instead of walking every node the run has created; by ante 38 that is
+        // ~76 dead entries searched on every draw. Same change, and the same
+        // reasoning, as the ante-local cache in deep_negative_shops.
+        inst->rngCache.nextFreeNode = 0;
+        inst->rngCache.lastNode = -1;
         init_unlocks(inst, ante, false);
         if (next_tag(inst, ante) == Negative_Tag) negativeTags1++;
+#ifndef NT_FIRST_SLOT_ONLY
         if (next_tag(inst, ante) == Negative_Tag) negativeTags2++;
+#endif
     }
     // We want to differentiate the tag position
     return negativeTags1 * 100 + negativeTags2;
