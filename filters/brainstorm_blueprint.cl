@@ -78,28 +78,41 @@ long filter(instance* inst) {
     shop shopInstance = get_shop_instance(inst);
     double totalRate = get_total_rate(shopInstance);
     for (int ante = 1; ante <= 2; ante++) {
+        // Shop window in dense phases (shop_items_dense): only Rare identities
+        // are drawn, as before; the card-type and rarity polls happen for every
+        // slot, as before, just phase by phase instead of slot by slot.
         int shopItems = ante == 1 ? BB_SHOP_ANTE1 : BB_SHOP_ANTE2;
+        shopitem window[BB_SHOP_ANTE2 > BB_SHOP_ANTE1 ? BB_SHOP_ANTE2 : BB_SHOP_ANTE1];
+        shop_items_dense(inst, ante, shopItems, window, SHOP_IDENT_RARE);
         for (int i = 0; i < shopItems; i++) {
-            double card_type = random(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2) * totalRate;
-            if (get_item_type(shopInstance, card_type) != ItemType_Joker) continue;
-            item joker = bb_rare_joker(inst, S_Shop, ante);
-            if (joker == Brainstorm) brainstorm = true;
-            if (joker == Blueprint) blueprint = true;
+            if (window[i].type != ItemType_Joker || window[i].joker._rarity != Rarity_Rare) continue;
+            if (window[i].joker.joker == Brainstorm) brainstorm = true;
+            if (window[i].joker.joker == Blueprint) blueprint = true;
         }
+        // Packs: every pack type first (one node, in pack order), then each
+        // lane walks its own list of Buffoon Packs. The contents live on other
+        // nodes, so drawing the types up front changes nothing; the warp now
+        // pays max over lanes of the Buffoon count instead of "some lane has
+        // one" on every pack.
         int packs = ante == 1 ? BB_PACKS_ANTE1 : BB_PACKS_ANTE2;
+        int buffoon[BB_PACKS_ANTE2 > BB_PACKS_ANTE1 ? BB_PACKS_ANTE2 : BB_PACKS_ANTE1];
+        int nb = 0;
         for (int p = 0; p < packs; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
-            if (_pack.type != Buffoon_Pack) continue;
+            if (_pack.type == Buffoon_Pack) buffoon[nb++] = _pack.size;
+        }
+        for (int q = 0; q < nb; q++) {
+            int size = buffoon[q];
             // buffoon_pack without the non-Rare identity draws: Rare jokers are
             // locked while the pack is open, exactly as buffoon_pack does.
             item drawn[5];
-            for (int j = 0; j < _pack.size; j++) {
+            for (int j = 0; j < size; j++) {
                 drawn[j] = bb_rare_joker(inst, S_Buffoon, ante);
                 if (drawn[j] == Brainstorm) brainstorm = true;
                 if (drawn[j] == Blueprint) blueprint = true;
                 if (drawn[j] != RETRY && !inst->params.showman) i_lock(inst, drawn[j]);
             }
-            for (int j = 0; j < _pack.size; j++) {
+            for (int j = 0; j < size; j++) {
                 if (drawn[j] != RETRY) i_unlock(inst, drawn[j]);
             }
         }

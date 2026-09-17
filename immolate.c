@@ -69,7 +69,7 @@ static int cli_is_known_option(const char* text) {
     static const char* options[] = {
         "-h", "-f", "-s", "-n", "-c", "-p", "-d", "-g", "-l", "--build_opts",
         "--list_devices", "--no_cache", "--verbose_build", "--single_pass",
-        "--batch", "--progress", "--to", "--scores_to", "--from", "--group_per_seed",
+        "--batch", "--progress", "--to", "--scores_to", "--from", "--group_per_seed", "--launch_seconds",
         "--to_parts", "--resume"
     };
     for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
@@ -215,6 +215,9 @@ int main(int argc, char **argv) {
     int noCache = 0;
     int verboseBuild = 0;
     int singlePass = 0;
+    // Plain single-pass searches are split into launches of about this many
+    // seconds each (0 = one launch for the whole range, the old behaviour).
+    double launchSeconds = 1.0;
     cl_long prefilterBatch = 1 << 26; // 67M seeds per pass-1 batch: 512 MB survivor buffer worst case
     int batchValid = 1;
     int progressEvery = 0;
@@ -240,8 +243,8 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in FILE instead of a rank range. FILE is either a seed-supplier file (made with --to) or a plain-text seed list: a filter's printed \"SEED (score)\" output, or one seed per line. Text lists are sorted and deduplicated, and lines that are not seeds are counted and ignored. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--group_per_seed  Give each seed a whole work-group instead of one work-item, and define GROUP_PER_SEED for the filter, so a filter that splits its own work across get_local_id can use every lane on one seed. Only affects the --from print path. Use it when a filter's per-seed cost is large and uneven; it does nothing for cheap filters.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
-            return 0;
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--launch_seconds <S>  In a plain single-pass search, split the range into kernel launches of about S seconds each (default 1). 0 runs the whole range as one launch. See docs/kernel_profile.md: on a display GPU under WDDM, single launches longer than ~2 s intermittently ran 7x slower.--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in FILE instead of a rank range. FILE is either a seed-supplier file (made with --to) or a plain-text seed list: a filter's printed \"SEED (score)\" output, or one seed per line. Text lists are sorted and deduplicated, and lines that are not seeds are counted and ignored. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--group_per_seed  Give each seed a whole work-group instead of one work-item, and define GROUP_PER_SEED for the filter, so a filter that splits its own work across get_local_id can use every lane on one seed. Only affects the --from print path. Use it when a filter's per-seed cost is large and uneven; it does nothing for cheap filters.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
+           return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
             if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
@@ -325,6 +328,11 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i],  "--single_pass")==0) {
             // Ignore the filter's prefilter and run the plain single-pass kernel.
             singlePass = 1;
+        }
+        if (strcmp(argv[i],  "--launch_seconds")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
+            launchSeconds = atof(argv[i+1]);
+            i++;
         }
         if (strcmp(argv[i],  "--batch")==0) {
             if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
@@ -1062,10 +1070,55 @@ build_program:
         }
     } else if (!twoPass && !toFile && !fromFile) {
         // Plain single pass: print straight from the kernel.
-        err = enqueue_1d(queue, ssKernel, &globalSize, &localSize, numGroups);
-        clErrCheck(err, "clEnqueueNDRangeKernel - Executing OpenCL kernel");
-        err = clFlush(queue);
-        err = clFinish(queue);
+        //
+        // The range is walked in launches of about --launch_seconds each rather
+        // than one launch for everything. The kernel derives every seed from
+        // start_rank + global id, so splitting the range changes nothing but
+        // the launch boundaries; the output was never ordered. Measured on an
+        // RTX 5080 under WDDM (docs/kernel_profile.md): 2 of 6 identical 3.3 s
+        // single launches of deep_negative_shops ran 21.7 s and 24.8 s, while
+        // the same work in ten 0.3 s launches took 2.96 s every time, and never
+        // once slower. The first launch is small (4 seeds per lane) and each
+        // next one is scaled by measured time towards the target, at most 4x
+        // per step, so cheap and expensive filters both converge in a few
+        // launches. Launch overhead is tens of microseconds once the module is
+        // loaded, so ~1 s launches cost nothing measurable.
+        cl_long batchStart = startRank;
+        cl_long remaining = numSeeds;
+        cl_long thisBatch = launchSeconds > 0 ? (cl_long)globalSize * 4 : numSeeds;
+        long long launches = 0;
+        while (remaining > 0) {
+            if (thisBatch > remaining) thisBatch = remaining;
+            err = clSetKernelArg(ssKernel, 0, sizeof(batchStart), &batchStart);
+            clErrCheck(err, "clSetKernelArg - Setting launch start rank");
+            err = clSetKernelArg(ssKernel, 1, sizeof(thisBatch), &thisBatch);
+            clErrCheck(err, "clSetKernelArg - Setting launch seed count");
+            double t0 = wall_seconds();
+            err = enqueue_1d(queue, ssKernel, &globalSize, &localSize, numGroups);
+            clErrCheck(err, "clEnqueueNDRangeKernel - Executing OpenCL kernel");
+            err = clFlush(queue);
+            err = clFinish(queue);
+            clErrCheck(err, "clFinish - Waiting for search launch");
+            double dt = wall_seconds() - t0;
+            batchStart += thisBatch;
+            remaining -= thisBatch;
+            launches++;
+            if (progressEvery > 0 && launches % progressEvery == 0) {
+                fprintf(stderr, "[%lld of %lld seeds, %.1fs]\n",
+                        (long long)(numSeeds - remaining), (long long)numSeeds, wall_seconds() - wallBegin);
+            }
+            if (launchSeconds > 0) {
+                double scale = dt > 1e-4 ? launchSeconds / dt : 4.0;
+                if (scale > 4.0) scale = 4.0;
+                if (scale < 0.25) scale = 0.25;
+                double next = (double)thisBatch * scale;
+                if (next > 4e18) next = 4e18;
+                thisBatch = (cl_long)next;
+                cl_long lanes = (cl_long)globalSize;
+                if (thisBatch < lanes) thisBatch = lanes;
+                thisBatch = (thisBatch / lanes) * lanes; // whole waves: every lane gets the same count
+            }
+        }
     } else {
         // Batched search. Seeds come from a rank range (walked in batches of
         // --batch) or from a supplier file (decoded in chunks); passing seeds go

@@ -1,5 +1,10 @@
 # DNS optimization, 2026-09
 
+> **2026-09-16:** a filter-independent profile and a second optimisation pass
+> followed this one; see [session_2026-09-16.md](session_2026-09-16.md) for what
+> changed and [kernel_profile.md](kernel_profile.md) for the measurements.
+
+
 `deep_negative_shops` got **3.738x faster** on an RTX 5080 — 8.577s to 2.295s over 344,064 seeds,
 40,115 to 149,950 seeds/s. A billion-seed pool went from ~6.9h to ~1.9h.
 

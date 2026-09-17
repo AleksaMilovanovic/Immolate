@@ -1,0 +1,38 @@
+[
+ {
+  "label": "uni_dns_plain_fixed",
+  "filter": "deep_negative_shops",
+  "n": 344064,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "fixed_n": true,
+  "force": true
+ },
+ {
+  "label": "uni_dns_ctl_fixed",
+  "filter": "diag_uni_dns",
+  "n": 344064,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "fixed_n": true,
+  "build_opts": "-DUNI_MASK=0"
+ },
+ {
+  "label": "uni_dns_warp_fixed",
+  "filter": "diag_uni_dns",
+  "n": 344064,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "fixed_n": true,
+  "build_opts": "-DUNI_MASK=31"
+ },
+ {
+  "label": "uni_dns_launch_fixed",
+  "filter": "diag_uni_dns",
+  "n": 344064,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "fixed_n": true,
+  "build_opts": "-DUNI_MASK=2147483647"
+ }
+]

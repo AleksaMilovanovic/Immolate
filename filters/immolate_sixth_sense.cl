@@ -85,32 +85,74 @@ inline item ss_uncommon_joker(instance* inst, rsrc src, int ante) {
 }
 
 // Scans the shop slots and Buffoon Packs of `ante`, setting *sixth / *seance
-// to `ante` for each of the two jokers seen there for the first time. Stops
-// early once both are known. Returns nothing; the callers read the two ints.
-void ss_scan_ante(instance* inst, int ante, shop shopInstance, double totalRate, int* sixth, int* seance) {
+// to `ante` for each of the two jokers seen there for the first time. Returns
+// nothing; the callers read the two ints.
+//
+// The shop window is drawn in dense phases (shop_items_dense, Uncommon
+// identities only) and the packs as "every type first, then this lane's own
+// Buffoon list"; the draws and their order per node are those of the slot-by-
+// slot loop this replaces, so the result is identical. The old loop stopped
+// once both jokers were found; that only skipped draws nothing else reads, so
+// drawing the whole window changes no value either.
+void ss_scan_ante(instance* inst, int ante, int* sixth, int* seance) {
     int shopItems = ante == 1 ? SS_SHOP_ANTE1 : SS_SHOP_LATER;
-    for (int i = 0; i < shopItems && !(*sixth && *seance); i++) {
-        double card_type = random(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2) * totalRate;
-        if (get_item_type(shopInstance, card_type) != ItemType_Joker) continue;
-        item j = ss_uncommon_joker(inst, S_Shop, ante);
+    shopitem window[SS_SHOP_LATER > SS_SHOP_ANTE1 ? SS_SHOP_LATER : SS_SHOP_ANTE1];
+    shop_items_dense(inst, ante, shopItems, window, SHOP_IDENT_UNCOMMON);
+    for (int i = 0; i < shopItems; i++) {
+        if (window[i].type != ItemType_Joker || window[i].joker._rarity != Rarity_Uncommon) continue;
+        item j = window[i].joker.joker;
         if (j == Sixth_Sense && !*sixth) *sixth = ante;
         if (j == Seance && !*seance) *seance = ante;
     }
     int packs = ante == 1 ? SS_PACKS_ANTE1 : SS_PACKS_LATER;
-    for (int p = 0; p < packs && !(*sixth && *seance); p++) {
+    int buffoon[SS_PACKS_LATER > SS_PACKS_ANTE1 ? SS_PACKS_LATER : SS_PACKS_ANTE1];
+    int nb = 0;
+    for (int p = 0; p < packs; p++) {
         pack _pack = pack_info(next_pack(inst, ante));
-        if (_pack.type != Buffoon_Pack) continue;
+        if (_pack.type == Buffoon_Pack) buffoon[nb++] = _pack.size;
+    }
+    for (int q = 0; q < nb; q++) {
+        int size = buffoon[q];
         item drawn[5];
-        for (int j = 0; j < _pack.size; j++) {
+        for (int j = 0; j < size; j++) {
             drawn[j] = ss_uncommon_joker(inst, S_Buffoon, ante);
             if (drawn[j] == Sixth_Sense && !*sixth) *sixth = ante;
             if (drawn[j] == Seance && !*seance) *seance = ante;
             if (drawn[j] != RETRY && !inst->params.showman) i_lock(inst, drawn[j]);
         }
-        for (int j = 0; j < _pack.size; j++) {
+        for (int j = 0; j < size; j++) {
             if (drawn[j] != RETRY) i_unlock(inst, drawn[j]);
         }
     }
+}
+
+// The creation check of filter(): the first few spectrals of each joker in
+// each ante, one node per joker per ante. Everything the filter scores is a
+// subset of these, so a seed with none of them scores 0 and can be dropped
+// before the shop scan. About 42% of seeds stop here. Defining SS_PREFILTER
+// makes it the two-pass prefilter (search.cl): pass 1 runs only this and pass
+// 2 runs filter() on the packed survivors. Measured on an RTX 5080 over 20M
+// seeds it is a wash (1.42 s vs 1.41 s single pass) once the creation check is
+// batched, because the survivors still diverge among themselves in pass 2, so
+// it is off by default. Exact for any cutoff >= 1; at cutoff 0 use --single_pass.
+#ifdef SS_PREFILTER
+#define HAS_PREFILTER
+#endif
+bool prefilter(instance* inst) {
+    // Same batched creation check as filter() (see there).
+    item sixthDraws[SS_MAX_ANTE * SS_TRIGGERS + 1];
+    item seanceDraws[SS_MAX_ANTE * SS_SEANCE_TRIGGERS + 1];
+    int sixthAntes[SS_MAX_ANTE * SS_TRIGGERS + 1];
+    int seanceAntes[SS_MAX_ANTE * SS_SEANCE_TRIGGERS + 1];
+    for (int ante = 1; ante <= SS_MAX_ANTE; ante++) {
+        for (int t = 0; t < SS_TRIGGERS; t++) sixthAntes[(ante - 1) * SS_TRIGGERS + t] = ante;
+        for (int t = 0; t < SS_SEANCE_TRIGGERS; t++) seanceAntes[(ante - 1) * SS_SEANCE_TRIGGERS + t] = ante;
+    }
+    randchoice_common_batch(inst, R_Spectral, S_Sixth_Sense, sixthAntes, 0, SS_MAX_ANTE * SS_TRIGGERS, SPECTRALS, sixthDraws);
+    for (int i = 0; i < SS_MAX_ANTE * SS_TRIGGERS; i++) if (sixthDraws[i] == Immolate) return true;
+    randchoice_common_batch(inst, R_Spectral, S_Seance, seanceAntes, 0, SS_MAX_ANTE * SS_SEANCE_TRIGGERS, SPECTRALS, seanceDraws);
+    for (int i = 0; i < SS_MAX_ANTE * SS_SEANCE_TRIGGERS; i++) if (seanceDraws[i] == Immolate) return true;
+    return false;
 }
 
 long filter(instance* inst) {
@@ -123,21 +165,42 @@ long filter(instance* inst) {
     // Immolates among each joker's first creations of each ante.
     int sixthImm[SS_MAX_ANTE + 1], seanceImm[SS_MAX_ANTE + 1];
     int lastSixth = 0, lastSeance = 0; // last ante with an Immolate, per joker
+    // next_spectral(src, ante, false) is randchoice_common on SPECTRALS, whose
+    // pool holds entries that are locked (The Soul and Black Hole are only
+    // reachable through the soul poll), so about one draw in nine rerolls and
+    // a warp waited on some lane's reroll at nearly every one of the 15 draws:
+    // the creation check alone measured 4.5x its warp-uniform time. Each
+    // source is one ante-keyed stream per ante with a constant lock set, so
+    // all of a source's draws are made as one depth-major batch
+    // (randchoice_common_batch): same draws, same order per node.
+    item sixthDraws[SS_MAX_ANTE * SS_TRIGGERS + 1];
+    item seanceDraws[SS_MAX_ANTE * SS_SEANCE_TRIGGERS + 1];
+    int sixthAntes[SS_MAX_ANTE * SS_TRIGGERS + 1];
+    int seanceAntes[SS_MAX_ANTE * SS_SEANCE_TRIGGERS + 1];
+    for (int ante = 1; ante <= SS_MAX_ANTE; ante++) {
+        for (int t = 0; t < SS_TRIGGERS; t++) sixthAntes[(ante - 1) * SS_TRIGGERS + t] = ante;
+        for (int t = 0; t < SS_SEANCE_TRIGGERS; t++) seanceAntes[(ante - 1) * SS_SEANCE_TRIGGERS + t] = ante;
+    }
+    randchoice_common_batch(inst, R_Spectral, S_Sixth_Sense, sixthAntes, 0, SS_MAX_ANTE * SS_TRIGGERS, SPECTRALS, sixthDraws);
+    randchoice_common_batch(inst, R_Spectral, S_Seance, seanceAntes, 0, SS_MAX_ANTE * SS_SEANCE_TRIGGERS, SPECTRALS, seanceDraws);
     for (int ante = 1; ante <= SS_MAX_ANTE; ante++) {
         int n = 0;
         for (int t = 0; t < SS_TRIGGERS; t++) {
-            if (next_spectral(inst, S_Sixth_Sense, ante, false) == Immolate) n++;
+            if (sixthDraws[(ante - 1) * SS_TRIGGERS + t] == Immolate) n++;
         }
         sixthImm[ante] = n;
         if (n > 0) lastSixth = ante;
         n = 0;
         for (int t = 0; t < SS_SEANCE_TRIGGERS; t++) {
-            if (next_spectral(inst, S_Seance, ante, false) == Immolate) n++;
+            if (seanceDraws[(ante - 1) * SS_SEANCE_TRIGGERS + t] == Immolate) n++;
         }
         seanceImm[ante] = n;
         if (n > 0) lastSeance = ante;
     }
     if (lastSixth == 0 && lastSeance == 0) return 0;
+#ifdef SS_DIAG_NO_SCAN
+    return lastSixth * 10 + lastSeance; // diagnostic: creation phase only, no shop scan
+#endif
 
 #ifdef SS_NEXT_ANTE_ONLY
     const int sameAnte = 0;
@@ -150,8 +213,6 @@ long filter(instance* inst) {
     int usefulSeance = lastSeance - (sameAnte ? 0 : 1);
     int lastUseful = usefulSixth > usefulSeance ? usefulSixth : usefulSeance;
 
-    shop shopInstance = get_shop_instance(inst);
-    double totalRate = get_total_rate(shopInstance);
     int sixthAnte = 0, seanceAnte = 0; // earliest ante each joker is offered
     for (int ante = 1; ante <= lastUseful; ante++) {
         // Stop looking for a joker once it is found or can no longer pay off.
@@ -159,7 +220,7 @@ long filter(instance* inst) {
         int wantSeance = !seanceAnte && ante <= usefulSeance;
         if (!wantSixth && !wantSeance) break;
         int sx = wantSixth ? 0 : -1, se = wantSeance ? 0 : -1; // -1: already settled, do not record
-        ss_scan_ante(inst, ante, shopInstance, totalRate, &sx, &se);
+        ss_scan_ante(inst, ante, &sx, &se);
         if (wantSixth && sx > 0) sixthAnte = sx;
         if (wantSeance && se > 0) seanceAnte = se;
     }

@@ -16,7 +16,7 @@
 // Deadlines are inclusive: the test runs after that ante's voucher is drawn, so
 // an ante-8 Blank passes EV_STAGE1_BY 8.
 #ifndef CACHE_SIZE
-#define CACHE_SIZE 32
+#define CACHE_SIZE 128
 #endif
 // No deck path, so drop the 52-item starting deck: the instance is local memory
 // on a GPU and its size is occupancy.
@@ -27,10 +27,10 @@
 #define EV_MAX_ANTE 38
 #endif
 #ifndef EV_STAGE1_BY
-#define EV_STAGE1_BY 8
+#define EV_STAGE1_BY 9
 #endif
 #ifndef EV_STAGE2_BY
-#define EV_STAGE2_BY 12
+#define EV_STAGE2_BY 14
 #endif
 
 __constant item EV_BOUGHT_VOUCHERS[] = {

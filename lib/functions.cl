@@ -420,6 +420,134 @@ shopitem next_shop_item(instance* inst, int ante) {
     return nextShopItem;
 }
 
+// A whole shop window of n items at once, with the same result as n calls of
+// next_shop_item in order, but drawn in dense phases: all card-type polls, then
+// the rarity poll of every joker slot, then the identities of each rarity pool
+// (depth-major resamples, see randchoice_common_batch), then sticker polls,
+// then edition polls, then tarot/planet/spectral identities for the other
+// slots. Every one of those lives on its own ante-keyed node and each node is
+// still consumed in slot order, so the values are identical; only the
+// interleaving across nodes changes. Shop draws set no temporary locks, so the
+// lock set is constant across the window as the batch helper requires.
+//
+// Why: per slot, next_shop_item makes lanes diverge on the item type, the
+// rarity and the resample chain, so a warp executes almost every branch for
+// almost every slot. Here each lane walks its own compacted list per phase
+// (its joker slots, its rare slots, ...), so a warp pays max over lanes of a
+// binomial count instead of "some lane needs it" for each of n slots.
+//
+// SHOP_* flags let a filter skip whole node streams it never reads (a common
+// identity nobody looks at, sticker polls at White Stake, tarot identities):
+// skipping a stream changes no other value, since nothing else reads that
+// node in this ante. A filter that later reads such a node itself must not
+// skip it. n <= SHOP_MAX_ITEMS. `out[i].value` is the joker or tarot/planet/
+// spectral identity, RETRY when skipped or for playing cards.
+#define SHOP_IDENT_COMMON   1u
+#define SHOP_IDENT_UNCOMMON 2u
+#define SHOP_IDENT_RARE     4u
+#define SHOP_IDENT_JOKERS   7u
+#define SHOP_STICKERS       8u
+#define SHOP_EDITIONS       16u
+#define SHOP_IDENT_OTHER    32u   // tarot / planet / spectral identities
+#define SHOP_EVERYTHING     63u
+void shop_items_dense_window(instance* inst, int ante, int n, shopitem out[], uint flags);
+// Slots per dense window. Larger shops are drawn in windows of this many
+// slots (exact: every node is still consumed in slot order across windows);
+// the per-lane arrays are sized by it, ~5 KB of private memory at 128.
+#ifndef SHOP_MAX_ITEMS
+#define SHOP_MAX_ITEMS 128
+#endif
+inline void shop_pool_dense(instance* inst, int ante, rtype rngType, __constant item pool[], rarity r,
+                            shopitem out[], const ushort jok[], int nj) {
+    ushort idx[SHOP_MAX_ITEMS];
+    item drawn[SHOP_MAX_ITEMS];
+    int m = 0;
+    for (int j = 0; j < nj; j++) if (out[jok[j]].joker._rarity == r) idx[m++] = jok[j];
+    if (m == 0) return;
+    randchoice_common_batch(inst, rngType, S_Shop, NULL, ante, m, pool, drawn);
+    for (int k = 0; k < m; k++) { out[idx[k]].joker.joker = drawn[k]; out[idx[k]].value = drawn[k]; }
+}
+inline void shop_other_dense(instance* inst, int ante, itemtype t, rtype rngType, __constant item pool[],
+                             shopitem out[], int n) {
+    ushort idx[SHOP_MAX_ITEMS];
+    item drawn[SHOP_MAX_ITEMS];
+    int m = 0;
+    for (int i = 0; i < n; i++) if (out[i].type == t) idx[m++] = (ushort)i;
+    if (m == 0) return;
+    randchoice_common_batch(inst, rngType, S_Shop, NULL, ante, m, pool, drawn);
+    for (int k = 0; k < m; k++) out[idx[k]].value = drawn[k];
+}
+void shop_items_dense(instance* inst, int ante, int n, shopitem out[], uint flags) {
+    // n > SHOP_MAX_ITEMS: draw in windows. Same values; each node is consumed
+    // in slot order within and across windows.
+    for (int base = 0; base < n; base += SHOP_MAX_ITEMS) {
+        int m = n - base < SHOP_MAX_ITEMS ? n - base : SHOP_MAX_ITEMS;
+        shop_items_dense_window(inst, ante, m, out + base, flags);
+    }
+}
+void shop_items_dense_window(instance* inst, int ante, int n, shopitem out[], uint flags) {
+    shop shopInstance = get_shop_instance(inst);
+    double totalRate = get_total_rate(shopInstance);
+    ushort jok[SHOP_MAX_ITEMS];
+    int nj = 0;
+    // 1. card types, one node
+    for (int i = 0; i < n; i++) {
+        double card_type = random(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2) * totalRate;
+        out[i].type = get_item_type(shopInstance, card_type);
+        out[i].value = RETRY;
+        out[i].joker.joker = RETRY;
+        out[i].joker._rarity = Rarity_Common;
+        out[i].joker.edition = No_Edition;
+        out[i].joker.stickers.eternal = false;
+        out[i].joker.stickers.perishable = false;
+        out[i].joker.stickers.rental = false;
+        if (out[i].type == ItemType_Joker) jok[nj++] = (ushort)i;
+    }
+    // 2. rarities, one node, joker slots in order. The node is resolved for
+    // every lane first: created on demand, lanes whose first joker sits in a
+    // later slot would create it in separate, partially active passes.
+    rng_node_resolve(inst, (__private ntype[]){N_Type, N_Ante, N_Source}, (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
+    for (int j = 0; j < nj; j++) out[jok[j]].joker._rarity = next_joker_rarity(inst, S_Shop, ante);
+    // 3. identities per pool (a shop rarity poll never yields Legendary)
+    if (flags & SHOP_IDENT_RARE)     shop_pool_dense(inst, ante, R_Joker_Rare,     RARE_JOKERS,     Rarity_Rare,     out, jok, nj);
+    if (flags & SHOP_IDENT_UNCOMMON) shop_pool_dense(inst, ante, R_Joker_Uncommon, UNCOMMON_JOKERS, Rarity_Uncommon, out, jok, nj);
+    if (flags & SHOP_IDENT_COMMON)   shop_pool_dense(inst, ante, R_Joker_Common,   COMMON_JOKERS,   Rarity_Common,   out, jok, nj);
+    // 4. sticker polls, as next_joker_with_info does for S_Shop
+    if (flags & SHOP_STICKERS) {
+        for (int j = 0; j < nj; j++) {
+            shopitem* si = &out[jok[j]];
+            item nextJoker = si->joker.joker;
+            double stickerPoll = random(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Eternal_Perishable, ante}, 2);
+            if (inst->params.stake >= Black_Stake && stickerPoll > 0.7) {
+                if (nextJoker != Gros_Michel && nextJoker != Ice_Cream && nextJoker != Cavendish && nextJoker != Luchador
+                && nextJoker != Turtle_Bean && nextJoker != Diet_Cola && nextJoker != Popcorn   && nextJoker != Ramen
+                && nextJoker != Seltzer     && nextJoker != Mr_Bones  && nextJoker != Invisible_Joker)
+                si->joker.stickers.eternal = true;
+            }
+            if (inst->params.stake >= Orange_Stake && stickerPoll > 0.4 && stickerPoll <= 0.7) {
+                if (nextJoker != Ceremonial_Dagger && nextJoker != Ride_the_Bus   && nextJoker != Runner  && nextJoker != Constellation
+                && nextJoker != Green_Joker       && nextJoker != Red_Card       && nextJoker != Madness && nextJoker != Square_Joker
+                && nextJoker != Vampire           && nextJoker != Rocket         && nextJoker != Obelisk && nextJoker != Lucky_Cat
+                && nextJoker != Flash_Card        && nextJoker != Spare_Trousers && nextJoker != Castle  && nextJoker != Wee_Joker)
+                si->joker.stickers.perishable = true;
+            }
+            if (inst->params.stake >= Gold_Stake) {
+                si->joker.stickers.rental = random(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Rental, ante}, 2) > 0.7;
+            }
+        }
+    }
+    // 5. editions, one node, joker slots in order
+    if (flags & SHOP_EDITIONS) {
+        for (int j = 0; j < nj; j++) out[jok[j]].joker.edition = next_joker_edition(inst, S_Shop, ante);
+    }
+    // 6. the other item types (soulable is false in shops, so plain pool draws)
+    if (flags & SHOP_IDENT_OTHER) {
+        shop_other_dense(inst, ante, ItemType_Tarot,    R_Tarot,    TAROTS,    out, n);
+        shop_other_dense(inst, ante, ItemType_Planet,   R_Planet,   PLANETS,   out, n);
+        shop_other_dense(inst, ante, ItemType_Spectral, R_Spectral, SPECTRALS, out, n);
+    }
+}
+
 //Todo: Update for vouchers, add a general one for any type of card
 // Deprecated, use next_shop_item() ^
 item shop_joker(instance* inst, int ante) {
@@ -628,6 +756,7 @@ item next_boss(instance* inst, int ante) {
         }
     }
     //has to be implemented like this because of randchoice() restrictions
+    DIAG_INC(inst, reseed); DIAG_INC(inst, draw);
     inst->rng = randomseed(get_node_child(inst, (__private ntype[]){N_Type}, (__private int[]){R_Boss}, 1));
     item chosen_boss =boss_pool[l_randint(&(inst->rng), 0, num_available_bosses-1)];
     i_lock(inst, chosen_boss);
@@ -734,6 +863,7 @@ void set_stake(instance* inst, item stake) {
 #ifndef INSTANCE_NO_DECK
 void shuffle_deck(instance* inst, item deck[], int ante) {
     init_deck(inst, deck);
+    DIAG_INC(inst, reseed); DIAG_ADD(inst, draw, inst->params.deckSize - 1);
     inst->rng = randomseed(get_node_child(inst, (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Shuffle_New_Round, ante}, 2));
     for (int i = inst->params.deckSize - 1; i >= 1; i--) {
         int x = l_randint(&(inst->rng), 1, i+1)-1;

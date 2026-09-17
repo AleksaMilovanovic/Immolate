@@ -100,6 +100,8 @@ Run:
   scores; they exist to be measured, not to search.
 - `lib/` — the shared kernel: RNG, hashing, item tables, instance state.
 
+Performance notes: [docs/session_2026-09-16.md](docs/session_2026-09-16.md) (what was optimised and why) and [docs/kernel_profile.md](docs/kernel_profile.md) (where the kernel's time goes, and the tooling to re-measure it).
+
 `-f <name>` resolves a bare name in either `filters/` or `diagnostics/`.
 
 ## Correctness and performance tests

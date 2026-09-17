@@ -49,28 +49,48 @@ char s_char_at(seed* s, int c) {
 // 1..35 are the one-character seeds "1".."Z", ranks 36..1260 the two-character
 // seeds, and so on. This is the ordering the searcher walks.
 long s_tell(seed* s) {
+    // Constant vector indices with a predicate per digit, for the same reason
+    // as s_from_rank below: s->data[i] with a loop index spills the vector.
     long rank = 0;
-    for (int i = 0; i < s->len; i++) {
-        rank = rank * NUM_CHARS + (long)s->data[i] + 1;
-    }
+    const int len = s->len;
+#define S_TELL_DIGIT(i) if (i < len) rank = rank * NUM_CHARS + (long)s->data[i] + 1;
+    S_TELL_DIGIT(0) S_TELL_DIGIT(1) S_TELL_DIGIT(2) S_TELL_DIGIT(3)
+    S_TELL_DIGIT(4) S_TELL_DIGIT(5) S_TELL_DIGIT(6) S_TELL_DIGIT(7)
+#undef S_TELL_DIGIT
     return rank;
 }
-// Inverse of s_tell.
+// Inverse of s_tell. The previous version wrote each digit through a dynamic
+// index into the ulong8 (s.data[s.len] = ...) and then swapped pairs the same
+// way; NVIDIA's compiler cannot keep a dynamically indexed vector in
+// registers, so every digit stored the whole 64-byte vector to the stack and
+// reloaded it, twice per digit. Measured at 0.83 ns per seed, more than the
+// seed's own 8-character hash. Here the eight digits are peeled into scalars
+// (least significant first) and placed with compile-time indices; the length
+// is uniform across lanes in practice (every searched seed is 8 characters),
+// so the switch is a uniform branch. Same digits, same ordering, same result.
 seed s_from_rank(long rank) {
     seed s;
     s.data = 0;
-    s.len = 0;
-    while (rank > 0 && s.len < 8) {
-        long r1 = rank - 1;
-        s.data[s.len] = r1 % NUM_CHARS; // least significant digit first, reversed below
-        rank = r1 / NUM_CHARS;
-        s.len++;
+    ulong d0 = 0, d1 = 0, d2 = 0, d3 = 0, d4 = 0, d5 = 0, d6 = 0, d7 = 0;
+    int len = 0;
+#define S_FROM_RANK_DIGIT(d) \
+    if (rank > 0) { long r1 = rank - 1; d = (ulong)(r1 % NUM_CHARS); rank = r1 / NUM_CHARS; len++; }
+    S_FROM_RANK_DIGIT(d0) S_FROM_RANK_DIGIT(d1) S_FROM_RANK_DIGIT(d2) S_FROM_RANK_DIGIT(d3)
+    S_FROM_RANK_DIGIT(d4) S_FROM_RANK_DIGIT(d5) S_FROM_RANK_DIGIT(d6) S_FROM_RANK_DIGIT(d7)
+#undef S_FROM_RANK_DIGIT
+    // Most significant digit first, as s_tell reads them.
+    switch (len) {
+        case 8: s.data = (ulong8)(d7, d6, d5, d4, d3, d2, d1, d0); break;
+        case 7: s.data = (ulong8)(d6, d5, d4, d3, d2, d1, d0, 0); break;
+        case 6: s.data = (ulong8)(d5, d4, d3, d2, d1, d0, 0, 0); break;
+        case 5: s.data = (ulong8)(d4, d3, d2, d1, d0, 0, 0, 0); break;
+        case 4: s.data = (ulong8)(d3, d2, d1, d0, 0, 0, 0, 0); break;
+        case 3: s.data = (ulong8)(d2, d1, d0, 0, 0, 0, 0, 0); break;
+        case 2: s.data = (ulong8)(d1, d0, 0, 0, 0, 0, 0, 0); break;
+        case 1: s.data = (ulong8)(d0, 0, 0, 0, 0, 0, 0, 0); break;
+        default: break;
     }
-    for (int lo = 0, hi = s.len - 1; lo < hi; lo++, hi--) {
-        ulong t = s.data[lo];
-        s.data[lo] = s.data[hi];
-        s.data[hi] = t;
-    }
+    s.len = len;
     return s;
 }
 // pseudohash of the seed string alone, streamed: no 260-byte text on the stack.

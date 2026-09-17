@@ -23,7 +23,7 @@
 // Only 0.3% of jokers are Negative, so the rarity value is computed for those
 // and skipped for the rest -- the state still moves, so the stream is exact.
 #ifndef CACHE_SIZE
-#define CACHE_SIZE 32
+#define CACHE_SIZE 128
 #endif
 // No deck path here, so drop the 52-item starting deck from every work-item's
 // instance: the instance lives in local memory on a GPU, and its size is
