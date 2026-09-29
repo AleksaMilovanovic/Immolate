@@ -115,7 +115,7 @@ long filter(instance* inst, long cutoff) {
     // depth 1, then depth 2, ... Exact: each ante's nodes are consumed in
     // slot order either way. Per warp this replaces "some lane rerolls" on
     // nearly every slot with the max over lanes of a binomial count.
-    for (int a0 = 2; a0 <= NT_MAX_ANTE; a0 += NT_CHUNK) {
+    for (int a0 = 15; a0 <= NT_MAX_ANTE; a0 += NT_CHUNK) {
         if (cutoff > 0) {
             // Passed: first-slot target met, and the second-slot one too if the
             // cutoff asked for any (score >= cutoff holds either way from here).

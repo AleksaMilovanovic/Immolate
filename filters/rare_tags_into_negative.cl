@@ -58,7 +58,7 @@
 #include "lib/immolate.cl"
 
 #ifndef NT_MAX_ANTE
-#define NT_MAX_ANTE 38
+#define NT_MAX_ANTE 12
 #endif
 #ifdef NT_NO_LOCKS
 // Diagnostic only: no profile locks at all (and ante 1 drawn with the ante-2
@@ -115,6 +115,7 @@ long filter(instance* inst, long cutoff) {
     // depth 1, then depth 2, ... Exact: each ante's nodes are consumed in
     // slot order either way. Per warp this replaces "some lane rerolls" on
     // nearly every slot with the max over lanes of a binomial count.
+    long rareTags = 0;
     for (int a0 = 2; a0 <= NT_MAX_ANTE; a0 += NT_CHUNK) {
         if (cutoff > 0) {
             // Passed: first-slot target met, and the second-slot one too if the
@@ -137,15 +138,26 @@ long filter(instance* inst, long cutoff) {
         inst->rngCache.lastNode = -1;
         randchoice_common_batch(inst, R_Tags, S_Null, antes, 0, n, TAGS, tags);
         for (int k = 0; k < n; k += NT_SLOTS) {
-            if (tags[k] == Negative_Tag) {
-                negativeTags1++;
-                continue;
+            if (tags[k] == Rare_Tag) {
+                rareTags = 3;
             }
-#ifndef NT_FIRST_SLOT_ONLY
-            if (tags[k + 1] == Negative_Tag) negativeTags2++;
-#endif
+            if (tags[k] == Negative_Tag) {
+                if (rareTags == 1) {
+                    return 1;
+                }
+            }
+            rareTags--;
+            if (tags[k+1] == Rare_Tag) {
+                rareTags = 3;
+            }
+            if (tags[k+1] == Negative_Tag) {
+                if (rareTags == 1) {
+                    return 1;
+                }
+            }
+            rareTags--;
         }
     }
     // We want to differentiate the tag position
-    return negativeTags1 + negativeTags2;
+    return 0;
 }

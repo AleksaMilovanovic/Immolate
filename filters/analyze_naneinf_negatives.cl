@@ -59,6 +59,18 @@
 // voucher flags and a few counters -- about 140 bytes -- and re-entering an ante
 // from one reproduces its draws bit for bit.
 //
+// What diverges is narrower than "the shop", though, and the difference is
+// worth about half the run time. Locks are consulted in exactly one place: when
+// a drawn identity is rejected and resampled. Which cards are Jokers, their
+// rarities and their editions come off three ante-keyed nodes that never look
+// at the lock set, so they are the same in every branch and are drawn once per
+// ante and cached -- see the ann_skel block below.
+//
+// The tree is also splittable across the lanes of a work-group, since the
+// branches are independent: --group_per_seed, and the GROUP_PER_SEED block at
+// the bottom of this file. Cache and lanes together were 7.4x on a 17-branch-
+// point seed at ANN_LAST_ANTE=26 (108.4 s -> 14.7 s).
+//
 // The tag layout itself is choice-independent: tags are drawn from their own
 // ante-keyed nodes against tag locks only, and nothing this filter locks is a
 // tag. So one cheap pre-pass finds every branch point before the search starts.
@@ -105,15 +117,49 @@
 #ifndef ANN_UNCOMMON_GATE_ANTE
 #define ANN_UNCOMMON_GATE_ANTE 25
 #endif
-// 4^10 leaves is already ~1e6 walks of a seed. Past this the seed is parked.
+// Past this many branch points the seed is parked rather than searched.
+//
+// Read it as a wall-clock budget, because cost is exponential in it: a branch
+// point is worth 2, 3 or 4 (4 when BOTH of an ante's tag slots are Negative),
+// so 17 is up to 4^17 leaves. A real one measured at 15.1 million leaves and
+// roughly 44 million ante walks -- well over a day on one work-item, a few
+// hours with --group_per_seed. 12 keeps a seed inside a minute or two. Use
+// diagnostics/naneinf_branch_tree.cl to see what a seed would actually cost
+// before committing to it.
 #ifndef ANN_MAX_BRANCH_POINTS
-#define ANN_MAX_BRANCH_POINTS 15
+#define ANN_MAX_BRANCH_POINTS 17
 #endif
 #if defined(ANN_EXPLAIN) && defined(GROUP_PER_SEED)
-// Every lane would run the printout for its own share of the tree, so the
-// output would be several interleaved strategies for one seed with no way to
-// tell which lane won. Explain one seed at a time instead.
-#error "ANN_EXPLAIN and GROUP_PER_SEED cannot be combined; drop --group_per_seed"
+// Explaining a seed whose tree is split across the lanes needs the group to
+// agree on which lane actually won before anyone prints -- otherwise every lane
+// reports its own share's best line and the output is several interleaved
+// strategies with no way to tell which is the answer. The kernel hands the
+// filter its work-group scratch array for exactly this; see search.cl.
+#define FILTER_USES_GROUP_SCRATCH
+
+// Elect the lane holding the largest value. Every lane returns the same index,
+// so no broadcast of the decision is needed. Ties go to the lowest lane, which
+// keeps the printed line reproducible across runs.
+inline int ann_group_argmax(__local long* scratch, int lane, int lanes, long mine) {
+    barrier(CLK_LOCAL_MEM_FENCE);
+    scratch[lane] = mine;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    int best = 0;
+    for (int i = 1; i < lanes; i++) if (scratch[i] > scratch[best]) best = i;
+    return best;
+}
+
+// Largest value across the group, for folding each lane's partial altBest into
+// the whole tree's. One entry at a time: altBest is at most 68 longs and the
+// scratch array is only one long per lane, and this runs once per seed.
+inline long ann_group_max(__local long* scratch, int lane, int lanes, long mine) {
+    barrier(CLK_LOCAL_MEM_FENCE);
+    scratch[lane] = mine;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    long m = scratch[0];
+    for (int i = 1; i < lanes; i++) if (scratch[i] > m) m = scratch[i];
+    return m;
+}
 #endif
 
 #define ANN_OVER_BUDGET 1000000000L
@@ -243,6 +289,15 @@ typedef struct AnnCtx {
     ann_log* pendingLog; // that tag's own log, so its score is reported there
     int uncAvail;       // Uncommons still in the pool, for ANN_LOCK_FLOOR
     bool overstock, overstockPlus;
+#ifdef ANN_DOM_AUDIT
+    // Why dominance pruning loses score. Counters, not branch state: they
+    // survive a restore so a whole seed's totals accumulate across the tree.
+    long audPrune;          // branches dropped as dominated
+    long audPruneSameLock;  //   ...of those, with the SAME lock set as the dominator
+    long audT1NoFit;        // T1 refused because no window of that width fits
+    long audT1NoFitWide;    //   ...of those, with width > 1, i.e. colas caused it
+    long audUncGateWide;    // T1_UNC refused by 2*unc < width, with width > 1
+#endif
 } ann_ctx;
 
 // ---------------------------------------------------------------------------
@@ -330,6 +385,83 @@ inline double ann_take_node(instance* inst, ntype nts[], int ids[], int num) {
         inst->rngCache.lastNode = -1;
     }
     return st;
+}
+
+// ---------------------------------------------------------------------------
+// THE BRANCH-INVARIANT SHOP SKELETON
+//
+// Which shop cards are Jokers, each Joker's rarity and each Joker's edition come
+// off three ante-keyed nodes -- R_Card_Type, R_Joker_Rarity/S_Shop and
+// R_Joker_Edition/S_Shop -- in loops whose length depends only on the ante and
+// on Overstock. None of the three consults the lock set. Locking a joker
+// changes which identity a draw RESOLVES to; it cannot move the card-type,
+// rarity or edition streams themselves, and the voucher sequence that sets
+// frameSize is drawn against voucher locks only, which no branch touches.
+//
+// So a given ante has ONE skeleton, shared by every branch of the tree, and the
+// search can compute it once instead of tens of millions of times. Checked
+// rather than assumed: -D ANN_INVARIANCE_CHECK walks every ante twice from the
+// same state, the second time with 20 extra Uncommons locked, and reports
+// whether the skeletons agree (they do, in all 36 antes, while ~2000 joker
+// identities differ).
+//
+// A cache keyed by ante is enough, and it is never invalidated: the DFS path
+// from the root to any node touches each ante at most once, and backtracking
+// cannot dirty an entry that did not depend on the branch in the first place.
+// So each ante is drawn on its first visit and read back on the other ~44
+// million.
+//
+// It is stored PACKED -- one bit per card for "is a Joker", two bits per Joker
+// for rarity and two for edition -- because the unpacked form is five shorts
+// per card, and 36 antes of that is 130 KB. Packed it is 13 KB. Unpacking is
+// integer work weighed against 924 fp64 draws, so the trade is not close.
+//
+// Measured: removing the skeleton draws entirely is worth 34% to 41% of the
+// per-ante-walk cost (per-walk 1.960 -> 1.151 ms at ANN_LAST_ANTE=24, 2.344 ->
+// 1.552 ms at 26).
+//
+// -D ANN_NO_SKELETON_CACHE compiles it out, which is how the cached and
+// uncached searches are checked against each other.
+// ---------------------------------------------------------------------------
+#define ANN_SKEL_JWORDS(cards) (((cards) + 63) / 64)
+#define ANN_SKEL_RWORDS(cards) ((2 * (cards) + 63) / 64)
+#define ANN_SKEL_ULONGS(cards) (ANN_SKEL_JWORDS(cards) + 2 * ANN_SKEL_RWORDS(cards))
+
+// Big enough for antes 3-38 reserved at the worst-case frame size (12.8 KB).
+// Antes that do not fit are simply not cached -- they redraw, exactly as
+// before -- so raising ANN_LAST_ANTE without raising this costs speed, never
+// correctness.
+#ifndef ANN_SKEL_WORDS
+#define ANN_SKEL_WORDS 1664
+#endif
+
+typedef struct AnnSkel {
+    ulong w[ANN_SKEL_WORDS];
+    int   off[ANN_LAST_ANTE + 2];    // word offset of this ante's slot, or -1
+    short jc[ANN_LAST_ANTE + 2];
+    uchar filled[ANN_LAST_ANTE + 2];
+} ann_skel;
+
+// Reserve every ante a slot up front, sized at frameSize 4 so the reservation
+// does not have to know what the vouchers will do. Walk the antes BACKWARDS:
+// if the arena cannot hold them all, the ones that miss out are the early antes
+// the search visits a handful of times, not the deep ones it spends all of its
+// time in.
+void ann_skel_init(ann_skel* sk) {
+    for (int ante = 0; ante <= ANN_LAST_ANTE + 1; ante++) {
+        sk->off[ante] = -1;
+        sk->jc[ante] = 0;
+        sk->filled[ante] = 0;
+    }
+#ifndef ANN_NO_SKELETON_CACHE
+    int bump = 0;
+    for (int ante = ANN_LAST_ANTE; ante >= ANN_FIRST_ANTE; ante--) {
+        int need = ANN_SKEL_ULONGS(ann_frames(ante) * 4);
+        if (bump + need > ANN_SKEL_WORDS) continue;
+        sk->off[ante] = bump;
+        bump += need;
+    }
+#endif
 }
 
 // A joker kept at a given ordinal. It leaves the pool for every LATER ordinal
@@ -459,7 +591,15 @@ inline void ann_restore(instance* inst, ann_ctx* c, const ann_snap* s) {
 #ifdef ANN_PROFILE
     long pd = c->draws, pp = c->depths, ps = c->passes, pa = c->antes;
 #endif
+#ifdef ANN_DOM_AUDIT
+    long a1 = c->audPrune, a2 = c->audPruneSameLock, a3 = c->audT1NoFit,
+         a4 = c->audT1NoFitWide, a5 = c->audUncGateWide;
+#endif
     *c = s->ctx;
+#ifdef ANN_DOM_AUDIT
+    c->audPrune = a1; c->audPruneSameLock = a2; c->audT1NoFit = a3;
+    c->audT1NoFitWide = a4; c->audUncGateWide = a5;
+#endif
 #ifdef ANN_NODE_PEAK
     c->nodePeak = peak;   // a high-water mark, not branch state
 #endif
@@ -600,7 +740,7 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
                    shop sh, double totalRate,
                    const ann_win* wins, int nwins,
                    int* colasAfterPacks, bool spendColas,
-                   ann_log* log) {
+                   ann_skel* sk, ann_log* log) {
     // Every reachable node is ante-keyed, so last ante's slots are unreachable.
     inst->rngCache.nextFreeNode = 0;
     inst->rngCache.lastNode = -1;
@@ -669,39 +809,88 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     a->frameSize = frameSize;
     a->halfCards = cards / 2;
 
+    // ---- skeleton: joker positions, rarities, editions ----
+    // Branch-invariant, so drawn once per ante and read back afterwards. See
+    // the ann_skel block above for why that is exact.
     lrandom scratch;
-    rng_node_id ctNode = rng_node_resolve(inst,
-        (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2);
-    double ctState = inst->rngCache.nodes[ctNode].rngState;
     int jc = 0;
-    for (int i = 0; i < cards; i++) {
-        double cardType = ann_random(inst, &ctState, &scratch) * totalRate;
-        if (get_item_type(sh, cardType) == ItemType_Joker) a->cardIdx[jc++] = (short)i;
+    int base = (sk != 0 && ante <= ANN_LAST_ANTE) ? sk->off[ante] : -1;
+    int jw = ANN_SKEL_JWORDS(cards);
+    int rw = ANN_SKEL_RWORDS(cards);
+
+    if (base >= 0 && sk->filled[ante]) {
+        jc = (int)sk->jc[ante];
+        // Set bits in increasing card order: low word first, low bit first,
+        // the same scan ann_flush_pool uses.
+        int o = 0;
+        for (int word = 0; word < jw; word++) {
+            ulong m = sk->w[base + word];
+            int off = word * 64;
+            while (m != 0UL) {
+                ulong low = m & (~m + 1UL);
+                a->cardIdx[o++] = (short)(off + (int)(63UL - clz(low)));
+                m ^= low;
+            }
+        }
+        for (int j = 0; j < jc; j++) {
+            int rb = 2 * j;   // always even, so a 2-bit field never straddles a word
+            a->rar[j] = (uchar)((sk->w[base + jw + (rb >> 6)] >> (rb & 63)) & 3UL);
+            a->ed[j]  = (uchar)((sk->w[base + jw + rw + (rb >> 6)] >> (rb & 63)) & 3UL);
+        }
+    } else {
+        if (base >= 0) for (int k = 0; k < jw + 2 * rw; k++) sk->w[base + k] = 0UL;
+
+        rng_node_id ctNode = rng_node_resolve(inst,
+            (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2);
+        double ctState = inst->rngCache.nodes[ctNode].rngState;
+        for (int i = 0; i < cards; i++) {
+            double cardType = ann_random(inst, &ctState, &scratch) * totalRate;
+            if (get_item_type(sh, cardType) == ItemType_Joker) {
+                a->cardIdx[jc++] = (short)i;
+                if (base >= 0) sk->w[base + (i >> 6)] |= 1UL << (i & 63);
+            }
+        }
+        inst->rngCache.nodes[ctNode].rngState = ctState;
+
+        rng_node_id rarNode = rng_node_resolve(inst,
+            (__private ntype[]){N_Type, N_Ante, N_Source}, (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
+        rng_node_id edNode = rng_node_resolve(inst,
+            (__private ntype[]){N_Type, N_Source, N_Ante}, (__private int[]){R_Joker_Edition, S_Shop, ante}, 3);
+        double rarState = inst->rngCache.nodes[rarNode].rngState;
+        double edState = inst->rngCache.nodes[edNode].rngState;
+        for (int j = 0; j < jc; j++) {
+            double rp = ann_random(inst, &rarState, &scratch);
+            uchar r = rp > 0.95 ? ANN_R_RARE : (rp > 0.7 ? ANN_R_UNCOMMON : ANN_R_COMMON);
+            // One poll decides the whole edition: Negative above 0.997, and any
+            // edition at all above 0.96. Anything with an edition is passed over by
+            // a Negative Tag without consuming it.
+            double ep = ann_random(inst, &edState, &scratch);
+            uchar e = 0;
+            if (ep > 0.997) e |= ANN_ED_NEGATIVE;
+            if (ep > 0.96) e |= ANN_ED_ANY;
+            a->rar[j] = r;
+            a->ed[j] = e;
+            if (base >= 0) {
+                int rb = 2 * j;
+                sk->w[base + jw + (rb >> 6)]      |= (ulong)r << (rb & 63);
+                sk->w[base + jw + rw + (rb >> 6)] |= (ulong)e << (rb & 63);
+            }
+        }
+        inst->rngCache.nodes[rarNode].rngState = rarState;
+        inst->rngCache.nodes[edNode].rngState = edState;
+
+        if (base >= 0) { sk->jc[ante] = (short)jc; sk->filled[ante] = 1; }
     }
-    inst->rngCache.nodes[ctNode].rngState = ctState;
+
     a->jokerCards = jc;
     if (jc == 0) return;
 
-    rng_node_id rarNode = rng_node_resolve(inst,
-        (__private ntype[]){N_Type, N_Ante, N_Source}, (__private int[]){R_Joker_Rarity, ante, S_Shop}, 3);
-    rng_node_id edNode = rng_node_resolve(inst,
-        (__private ntype[]){N_Type, N_Source, N_Ante}, (__private int[]){R_Joker_Edition, S_Shop, ante}, 3);
-    double rarState = inst->rngCache.nodes[rarNode].rngState;
-    double edState = inst->rngCache.nodes[edNode].rngState;
+    // Eligible-target numbering is derived from the skeleton, not drawn, so it
+    // is recomputed on both paths rather than being cached with it.
     int eligCount = 0;
     for (int j = 0; j < jc; j++) {
-        double rp = ann_random(inst, &rarState, &scratch);
-        a->rar[j] = rp > 0.95 ? ANN_R_RARE : (rp > 0.7 ? ANN_R_UNCOMMON : ANN_R_COMMON);
-        // One poll decides the whole edition: Negative above 0.997, and any
-        // edition at all above 0.96. Anything with an edition is passed over by
-        // a Negative Tag without consuming it.
-        double ep = ann_random(inst, &edState, &scratch);
-        uchar e = 0;
-        if (ep > 0.997) e |= ANN_ED_NEGATIVE;
-        if (ep > 0.96) e |= ANN_ED_ANY;
-        a->ed[j] = e;
         a->ident[j] = 0;
-        if (e & ANN_ED_ANY) {
+        if (a->ed[j] & ANN_ED_ANY) {
             a->elig[j] = -1;
         } else {
             a->elig[j] = (short)eligCount;
@@ -709,8 +898,6 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             eligCount++;
         }
     }
-    inst->rngCache.nodes[rarNode].rngState = rarState;
-    inst->rngCache.nodes[edNode].rngState = edState;
     a->eligCount = eligCount;
 
     // ---- identities, pool by pool ----
@@ -851,9 +1038,29 @@ int ann_pick_window(const ann_ante* a, int ante, int width, int limitCards, int 
     return best;
 }
 
-// The choices an ante offers, in a stable order: NONE first, then whatever its
-// tags allow. A flat combination number indexes the branch tree through these,
-// which is what lets the tree be split across work-items.
+inline bool ann_offered(uchar tag, int ante, int choice) {
+    if (choice == ANN_NONE) return true;
+    if (choice == ANN_T1_COPY || choice == ANN_T1_UNC) return (tag & 1) != 0;
+    return (tag & 2) != 0 && ante < ANN_LAST_ANTE;   // T2 needs a next ante to fire in
+}
+
+// The order the DFS tries an ante's choices in. It cannot change which leaf is
+// best -- the search is exhaustive -- but it decides what the incumbent is
+// while the rest of the tree is still being explored, and every prune that
+// compares against an incumbent is only as good as that incumbent. NONE is the
+// line that banks and does nothing, so trying it first sets the loosest
+// possible bar; it goes last. Spending a first-slot tag is the likeliest to
+// score, so it goes first.
+//
+// Ties between equal-scoring leaves are broken by this order too, so the line
+// PRINTED for a seed can change when this changes, even though the score does
+// not.
+__constant int ANN_ORDER[4] = { ANN_T1_COPY, ANN_T1_UNC, ANN_T2, ANN_NONE };
+
+// How many of the four an ante actually offers, and the i-th of them in
+// ANN_ORDER. A flat combination number indexes the branch tree through these,
+// which is what lets the tree be split across work-items, so the two must agree
+// with the DFS below on the order.
 inline int ann_arity(uchar tag, int ante) {
     int n = 1;                                        // NONE is always offered
     if (tag & 1) n += 2;                              // T1_COPY, T1_UNC
@@ -861,18 +1068,14 @@ inline int ann_arity(uchar tag, int ante) {
     return n;
 }
 inline int ann_choice_at(uchar tag, int ante, int i) {
-    if (i == 0) return ANN_NONE;
-    if (tag & 1) {
-        if (i == 1) return ANN_T1_COPY;
-        if (i == 2) return ANN_T1_UNC;
+    int seen = 0;
+    for (int k = 0; k < 4; k++) {
+        int ch = ANN_ORDER[k];
+        if (!ann_offered(tag, ante, ch)) continue;
+        if (seen == i) return ch;
+        seen++;
     }
-    return ANN_T2;
-}
-
-inline bool ann_offered(uchar tag, int ante, int choice) {
-    if (choice == ANN_NONE) return true;
-    if (choice == ANN_T1_COPY || choice == ANN_T1_UNC) return (tag & 1) != 0;
-    return (tag & 2) != 0 && ante < ANN_LAST_ANTE;   // T2 needs a next ante to fire in
+    return ANN_NONE;
 }
 
 // Walk one ante inside a branch: fire any window a second-slot tag left
@@ -880,7 +1083,7 @@ inline bool ann_offered(uchar tag, int ante, int choice) {
 // on this seed (no copy joker in reach, or the Uncommon gate refuses), which
 // prunes that subtree instead of duplicating a weaker line.
 bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
-                   shop sh, double totalRate, int choice, ann_log* log) {
+                   shop sh, double totalRate, int choice, ann_skel* sk, ann_log* log) {
     ann_snap start;
     ann_save(inst, c, &start);
 
@@ -923,7 +1126,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
 
     // For NONE and T2 this is the whole line. For a first-slot tag it also
     // scouts the queue the window will be chosen from.
-    ann_ante_walk(inst, c, a, ante, sh, totalRate, wins, nw, &colasAfterPacks, false, log);
+    ann_ante_walk(inst, c, a, ante, sh, totalRate, wins, nw, &colasAfterPacks, false, sk, log);
     log->colas = colasAfterPacks;
     log->frameSize = a->frameSize;
 
@@ -932,6 +1135,25 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         // first-slot window here starts after it.
         int minStart = nw > 0 ? wins[0].start + wins[0].width : 0;
         int width = 1 + ann_colas_effective(colasAfterPacks);
+
+        // How many eligible targets are left in reach at all: eligible ordinals
+        // run in card order, so this is just how many sit before halfCards from
+        // minStart on.
+        //
+        // A chained tag used to be REFUSED when the stock was wider than the
+        // room left, which made banking more colas strictly worse -- a branch
+        // holding more tags lost an option the branch holding fewer kept. The
+        // game has no such rule: the tag turns the jokers it reaches Negative
+        // and the rest of the chain is simply wasted. So spend what fits and
+        // throw the remainder away; the colas are consumed either way.
+        int fits = 0;
+        for (int e = minStart; e < a->eligCount; e++) {
+            if (a->cardIdx[a->eligSlot[e]] >= a->halfCards) break;
+            fits++;
+        }
+        if (fits <= 0) return false;   // nothing in reach: the tag has no target
+        if (width > fits) width = fits;
+
         int copies = 0, unc = 0;
         int ws = ann_pick_window(a, ante, width, a->halfCards, minStart,
                                  choice == ANN_T1_COPY, &copies, &unc);
@@ -940,7 +1162,14 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         if (choice == ANN_T1_COPY && copies < 1) return false;
         // Below half Uncommons the pool barely moves, and past the gate ante
         // there is no run left to spend the extra Diet Colas in.
-        if (choice == ANN_T1_UNC && (ante > ANN_UNCOMMON_GATE_ANTE || 2 * unc < width)) return false;
+        // Measured against the width actually spent, not the stock, now that
+        // the two can differ.
+        if (choice == ANN_T1_UNC && (ante > ANN_UNCOMMON_GATE_ANTE || 2 * unc < width)) {
+#ifdef ANN_DOM_AUDIT
+            if (2 * unc < width && width > 1) c->audUncGateWide++;
+#endif
+            return false;
+        }
         wins[nw].start = ws;
         wins[nw].width = width;
         wins[nw].limitCards = a->halfCards;
@@ -961,7 +1190,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             pendLog->nitems = pendItems0;
             pendLog->lastCopyCard = pendCopy0;
         }
-        ann_ante_walk(inst, c, a, ante, sh, totalRate, wins, nw, &colasAfterPacks, true, log);
+        ann_ante_walk(inst, c, a, ante, sh, totalRate, wins, nw, &colasAfterPacks, true, sk, log);
         log->colas = colasAfterPacks;
         log->width = width;
         log->startCard = a->cardIdx[a->eligSlot[ws]];
@@ -979,6 +1208,240 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         c->colas = 0;
         log->width = c->pendingWidth;
     }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// DOMINANCE PRUNING (ON by default; -D ANN_NO_DOMINANCE turns it off)
+//
+// A branch standing at a branch point behind another branch on every axis that
+// matters is dropped. This is a HEURISTIC and it does lose score. What makes it
+// worth having by default is WHERE it loses: on mid-pool seeds, never on the
+// ranking, which is what a search is actually for.
+//
+// WHY IT IS NOT SOUND. The axes are a summary, not the state. "ten Uncommons
+// left" is a COUNT; the state is WHICH ten. randchoice_common resamples against
+// the lock set, so two branches holding different tens draw different jokers at
+// the same shop ordinals from there on. Diet Cola is no likelier for either --
+// it is never locked, so it is one in N of whatever remains either way -- but
+// the realised sequence differs, and a copy joker lands inside one branch's tag
+// window and outside the other's. It is a different roll of the same dice, not
+// a better one, which is why the damage is symmetric luck rather than bias.
+// Audited with -D ANN_DOM_AUDIT over 4,975 seeds at full depth: of 19,643
+// prunes, 63.3% had a dominator holding a DIFFERENT lock set.
+//
+// (There used to be a second reason, and it was worse: refusing a chained tag
+// when the cola stock was wider than the room left made MORE colas strictly
+// worse, so the axis was not even monotone in the model. ann_ante_step now
+// clamps the window to what fits and throws the rest of the chain away, which
+// is what the game does. See the `fits` block there.)
+//
+// WHAT IT COSTS, on 5,000 seeds at full depth:
+//   time                          92.8 s -> 34.9 s   (2.66x)
+//   seeds scoring lower           75 of 4,975        (1.51%)
+//   value kept on those seeds     worst 53.7%, p10 95.2%, median 98.4%
+//   pool total                    99.937% kept
+//   top-100 seeds by true score   99.96% kept
+//   top-10 / top-50 / top-100     the SAME seeds, every one
+//   top-250                       249 of 250 the same
+// No seed ever scores higher: a pruned branch simply never reaches a leaf.
+//
+// The seven seeds that keep under 95% sit at the 65th to 75th percentile of the
+// pool -- they were never going to be selected. Nothing in the top 2% loses
+// more than about a tenth. So for ranking a pool this is close to free, and for
+// reporting ONE named seed's exact score it is not: use -D ANN_NO_DOMINANCE
+// there.
+//
+// It cannot be tuned away. ANN_DOM_FRONTIER at 8, 16, 32, 64 and 128 gives
+// byte-identical scores, so the loss is not frontier eviction, it is genuine
+// domination between states that were never comparable.
+//
+// -D ANN_DOM_EXACT drops only an exact repeat of a state already seen at that
+// depth -- a transposition, which IS lossless (measured: 0 of 5,000 changed).
+// It is not a faster option, it is a slower one: exact repeats are rare and the
+// lock-bitset compare costs more than they save (84.7 s against 34.9 s
+// unpruned, before the clamp). It is here for the rare case where exactness
+// matters more than the tree size and -D ANN_NO_DOMINANCE is too slow.
+//
+// The axes:
+//
+//   copies/fives/ones  the score, NOT collapsed into one number. It is a
+//              weighted sum and the parts buy different futures: a copy joker
+//              feeds the cola engine through ann_saw_copy, a Baron or Mime is
+//              five flat points that buy nothing later.
+//
+//   colas      banked Double Tags -- but c->colas alone is the wrong number.
+//              Taking T2 moves the whole stock into pendingWidth and sets
+//              c->colas to 0, so a branch that just cashed twenty colas into a
+//              tag in flight reads as zero and would be dominated by one
+//              holding a single banked cola. The key adds the in-flight tag
+//              back: colas + (pendingWidth - 1), the -1 being the tag itself
+//              rather than banked stock. Higher is better. (Note the stock and
+//              the window are not 1:1: ann_colas_effective is integer
+//              colas * 9 / 10, so 20 and 21 colas both buy a width of 19.)
+//
+//   seenCola   whether a Diet Cola has been met yet. ann_saw_copy only banks a
+//              cola `if (c->seenCola ...)`: you need one in hand as the
+//              template the copy jokers copy, so until then the engine is off
+//              and copy jokers bank nothing. Diet Cola arrives through the
+//              Uncommon identity stream, which is exactly what diverges
+//              between branches, so two branches at one depth really can
+//              differ on it. True is better.
+//
+//   uncAvail   Uncommons still in the pool. FEWER is better, not worse: the
+//              whole engine is that keeping negative Uncommons shrinks the
+//              pool and raises Diet Cola's share of it, so a drained pool is a
+//              branch still scaling. An incumbent only dominates if its pool is
+//              at least as drained.
+//
+//   noFarmBp/noFarmBs  a Negative Blueprint or Brainstorm is owned and kept, so
+//              that kind stops being sold for Double Tags. The points are
+//              already counted under copies, so the flag alone is future loss;
+//              false is better.
+//
+// One "best so far" record per depth would not do, because with four axes the
+// componentwise best is a state no branch ever actually reached, and pruning
+// against a synthetic state can drop branches that nothing real dominates. So
+// each depth keeps a small Pareto frontier instead.
+// ---------------------------------------------------------------------------
+// ON by default: -D ANN_NO_DOMINANCE turns it off and restores the exhaustive
+// search. Turn it off when you need one named seed's score to be exactly right
+// rather than a pool ranked correctly.
+#if !defined(ANN_NO_DOMINANCE) && !defined(ANN_DOMINANCE)
+#define ANN_DOMINANCE
+#endif
+
+#ifndef ANN_DOM_FRONTIER
+#define ANN_DOM_FRONTIER 8
+#endif
+
+// The score is NOT one axis. It is a weighted sum, and the parts buy different
+// futures: a copy joker feeds the cola engine through ann_saw_copy, a Baron or
+// Mime is five flat points that buy nothing later. Collapsing them lets three
+// copies dominate two copies and a Baron, and that single collapse is where
+// most of the pruning damage was measured (-5 losses, i.e. exactly one
+// Baron/Mime/DNA). So they are separate axes.
+//
+// The two farming flags are axes too, and they run the other way: negBlueprint
+// means a Negative Blueprint is owned and kept, so Blueprints STOP being sold
+// for Double Tags. The points are already counted under copies, so the flag on
+// its own is pure future loss -- false is better.
+typedef struct AnnDom {
+    int copies, fives, ones;   // higher better
+    int colas;                 // banked + in flight; higher better
+    int uncAvail;              // lower better
+    int seenCola;              // higher better
+    int noFarmBp, noFarmBs;    // lower better: farming shut off for that kind
+    int pendingWidth;          // kept separate from colas for the exact test
+#if defined(ANN_DOM_AUDIT) || defined(ANN_DOM_EXACT)
+    ulong locked[LOCKED_WORDS]; // the rest of the state: WHICH jokers are gone
+#endif
+} ann_dom;
+
+inline void ann_dom_key(const ann_ctx* c, ann_dom* d) {
+    d->copies = c->copies;
+    d->fives = c->fives;
+    d->ones = c->ones;
+    d->colas = c->colas + (c->pendingWidth > 0 ? c->pendingWidth - 1 : 0);
+    d->uncAvail = c->uncAvail;
+    d->seenCola = c->seenCola ? 1 : 0;
+    d->noFarmBp = c->negBlueprint ? 1 : 0;
+    d->noFarmBs = c->negBrainstorm ? 1 : 0;
+    d->pendingWidth = c->pendingWidth;
+}
+
+#if defined(ANN_DOM_AUDIT) || defined(ANN_DOM_EXACT)
+inline void ann_dom_locks(ann_dom* d, const instance* inst) {
+    for (int i = 0; i < LOCKED_WORDS; i++) d->locked[i] = inst->locked[i];
+}
+inline bool ann_dom_same_locks(const ann_dom* a, const ann_dom* b) {
+    for (int i = 0; i < LOCKED_WORDS; i++) if (a->locked[i] != b->locked[i]) return false;
+    return true;
+}
+
+// EXACT pruning (-D ANN_DOM_EXACT): a transposition, not a bet.
+//
+// Two branches that reach the same branch point in literally the same state --
+// same lock set, same counters, same tag in flight -- have identical subtrees
+// below them, because everything the walk reads from here on is a function of
+// (seed, ante, lock set) and the counters. Dropping the second one cannot lose
+// a point. The only thing it can change is which ann_log a pending window's
+// points are REPORTED against, never the total.
+//
+// Everything in ann_ctx that is not compared here is either branch-independent
+// at a given ante (overstock, overstockPlus, the voucher flags) or is
+// bookkeeping for the printout (pendingLog).
+inline bool ann_dom_identical(const ann_dom* a, const ann_dom* b) {
+    return a->copies == b->copies && a->fives == b->fives && a->ones == b->ones &&
+           a->colas == b->colas && a->uncAvail == b->uncAvail &&
+           a->seenCola == b->seenCola && a->noFarmBp == b->noFarmBp &&
+           a->noFarmBs == b->noFarmBs && a->pendingWidth == b->pendingWidth &&
+           ann_dom_same_locks(a, b);
+}
+#endif
+
+// Does `a` dominate `b`: at least as good on every axis, strictly better on one.
+inline bool ann_dom_beats(const ann_dom* a, const ann_dom* b) {
+    if (a->copies < b->copies || a->fives < b->fives || a->ones < b->ones ||
+        a->colas < b->colas || a->seenCola < b->seenCola ||
+        a->uncAvail > b->uncAvail ||
+        a->noFarmBp > b->noFarmBp || a->noFarmBs > b->noFarmBs) return false;
+    return a->copies > b->copies || a->fives > b->fives || a->ones > b->ones ||
+           a->colas > b->colas || a->seenCola > b->seenCola ||
+           a->uncAvail < b->uncAvail ||
+           a->noFarmBp < b->noFarmBp || a->noFarmBs < b->noFarmBs;
+}
+
+inline long ann_dom_score(const ann_dom* d) {
+    return (long)d->copies * ANN_W_COPY + (long)d->fives * ANN_W_FIVE + (long)d->ones * ANN_W_ONE;
+}
+
+// True to explore this branch, false to drop it. A surviving branch joins the
+// frontier, evicting whatever it dominates. A full frontier only takes it in
+// place of the lowest-scoring entry, and otherwise leaves the frontier alone --
+// declining to record is always safe, because an entry that is not there simply
+// prunes nothing.
+inline bool ann_dom_admit(ann_dom* front, int* nfront, int depth, ann_ctx* c,
+                          const instance* inst) {
+    ann_dom mine;
+    ann_dom_key(c, &mine);
+#if defined(ANN_DOM_AUDIT) || defined(ANN_DOM_EXACT)
+    ann_dom_locks(&mine, inst);
+#else
+    (void)inst;
+#endif
+    ann_dom* row = front + depth * ANN_DOM_FRONTIER;
+    int n = nfront[depth];
+#ifdef ANN_DOM_EXACT
+    // Drop only an exact repeat of a state already explored. Lossless.
+    for (int i = 0; i < n; i++) if (ann_dom_identical(&row[i], &mine)) {
+#ifdef ANN_DOM_AUDIT
+        c->audPrune++; c->audPruneSameLock++;
+#endif
+        return false;
+    }
+#else
+    for (int i = 0; i < n; i++) if (ann_dom_beats(&row[i], &mine)) {
+#ifdef ANN_DOM_AUDIT
+        c->audPrune++;
+        if (ann_dom_same_locks(&row[i], &mine)) c->audPruneSameLock++;
+#endif
+        return false;
+    }
+#endif
+#ifndef ANN_DOM_EXACT
+    int w = 0;
+    for (int i = 0; i < n; i++) if (!ann_dom_beats(&mine, &row[i])) row[w++] = row[i];
+    n = w;
+#endif
+    if (n < ANN_DOM_FRONTIER) {
+        row[n++] = mine;
+    } else {
+        int lo = 0;
+        for (int i = 1; i < n; i++) if (ann_dom_score(&row[i]) < ann_dom_score(&row[lo])) lo = i;
+        if (ann_dom_score(&mine) > ann_dom_score(&row[lo])) row[lo] = mine;
+    }
+    nfront[depth] = n;
     return true;
 }
 
@@ -1001,11 +1464,17 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
                 int* bestChoice, ann_log* bestLog,
                 const int* refChoice, long* altBest,
                 int forcedDepth, const int* forcedChoice,
-                ann_ctx* bestCtxOut) {
+                ann_ctx* bestCtxOut, ann_skel* sk) {
     ann_ante a;
     ann_snap snap[ANN_MAX_BRANCH_POINTS + 1];
     ann_log cur[ANN_MAX_BRANCH_POINTS];
     int choice[ANN_MAX_BRANCH_POINTS];
+    int slot[ANN_MAX_BRANCH_POINTS];   // index into ANN_ORDER, not the choice itself
+#ifdef ANN_DOMINANCE
+    ann_dom front[(ANN_MAX_BRANCH_POINTS + 1) * ANN_DOM_FRONTIER];
+    int nfront[ANN_MAX_BRANCH_POINTS + 1];
+    for (int d = 0; d <= ANN_MAX_BRANCH_POINTS; d++) nfront[d] = 0;
+#endif
     ann_log dump;
     ann_ctx ctx;
 
@@ -1014,6 +1483,10 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
     ctx.pendingWidth = 0; ctx.pendingLog = 0;
     ctx.overstock = false; ctx.overstockPlus = false;
     ctx.uncAvail = uncAvail0;
+#ifdef ANN_DOM_AUDIT
+    ctx.audPrune = 0; ctx.audPruneSameLock = 0; ctx.audT1NoFit = 0;
+    ctx.audT1NoFitWide = 0; ctx.audUncGateWide = 0;
+#endif
 #ifdef ANN_PROFILE
     ctx.draws = 0; ctx.depths = 0; ctx.passes = 0; ctx.antes = 0;
 #endif
@@ -1023,7 +1496,7 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
 
     int firstBp = (M > 0) ? bpAnte[0] : ANN_LAST_ANTE + 1;
     for (int ante = 1; ante < firstBp; ante++)
-        ann_ante_step(inst, &ctx, &a, ante, sh, totalRate, ANN_NONE, &dump);
+        ann_ante_step(inst, &ctx, &a, ante, sh, totalRate, ANN_NONE, sk, &dump);
     if (M == 0) {
         if (bestCtxOut != 0) *bestCtxOut = ctx;
 #ifdef ANN_NODE_PEAK
@@ -1036,30 +1509,40 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
     long best = -1;
     ann_save(inst, &ctx, &snap[0]);
     int depth = 0;
-    choice[0] = -1;
+    slot[0] = -1;
     while (depth >= 0) {
         int ante = bpAnte[depth];
         if (depth < forcedDepth) {
             // This branch point is pinned by the caller: one option, once.
-            if (choice[depth] >= 0) { depth--; continue; }
+            if (slot[depth] >= 0) { depth--; continue; }
+            slot[depth] = 0;
             choice[depth] = forcedChoice[depth];
         } else {
-            choice[depth]++;
-            if (choice[depth] > ANN_T2) { depth--; continue; }
+            // ANN_ORDER, not the enum order: see the note on ANN_ORDER above.
+            slot[depth]++;
+            if (slot[depth] >= 4) { depth--; continue; }
+            choice[depth] = ANN_ORDER[slot[depth]];
             if (!ann_offered(tagNeg[ante], ante, choice[depth])) continue;
         }
 
         ann_restore(inst, &ctx, &snap[depth]);
-        if (!ann_ante_step(inst, &ctx, &a, ante, sh, totalRate, choice[depth], &cur[depth]))
+        if (!ann_ante_step(inst, &ctx, &a, ante, sh, totalRate, choice[depth], sk, &cur[depth]))
             continue;   // unavailable on this seed; prune rather than duplicate NONE
         int stop = (depth + 1 < M) ? bpAnte[depth + 1] : ANN_LAST_ANTE + 1;
         for (int t = ante + 1; t < stop; t++)
-            ann_ante_step(inst, &ctx, &a, t, sh, totalRate, ANN_NONE, &dump);
+            ann_ante_step(inst, &ctx, &a, t, sh, totalRate, ANN_NONE, sk, &dump);
 
         if (depth + 1 < M) {
+#ifdef ANN_DOMINANCE
+            // The alternatives pass prunes identically to the search -- same
+            // traversal, same frontier, so the same branches go. If it saw the
+            // whole tree instead it could price an "alternative" above the
+            // headline score, which reads as a bug rather than as a pruned run.
+            if (!ann_dom_admit(front, nfront, depth + 1, &ctx, inst)) continue;
+#endif
             ann_save(inst, &ctx, &snap[depth + 1]);
             depth++;
-            choice[depth] = -1;
+            slot[depth] = -1;
             continue;
         }
 
@@ -1079,6 +1562,17 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
             if (d < M && sc > altBest[d * 4 + choice[d]]) altBest[d * 4 + choice[d]] = sc;
         }
     }
+#ifdef ANN_DOM_AUDIT
+    // 1 = branches pruned as dominated
+    // 2 =   ...of those, ones whose lock set MATCHED the dominator's
+    // 3 = T1 refusals because no window of that width fits
+    // 4 =   ...of those, with width > 1, so the cola stock is what removed it
+    // 5 = T1_UNC refusals by the 2*unc < width gate, with width > 1
+    return ANN_DOM_AUDIT == 1 ? ctx.audPrune
+         : ANN_DOM_AUDIT == 2 ? ctx.audPruneSameLock
+         : ANN_DOM_AUDIT == 3 ? ctx.audT1NoFit
+         : ANN_DOM_AUDIT == 4 ? ctx.audT1NoFitWide : ctx.audUncGateWide;
+#endif
 #ifdef ANN_PROFILE
     // 1 = pool draws, 2 = resample-depth iterations, 3 = refinement passes,
     // 4 = ante walks. Counters survive a branch restore, so these are the
@@ -1157,7 +1651,11 @@ void ann_explain(long best, const int* bpAnte, int M,
 }
 #endif
 
+#ifdef FILTER_USES_GROUP_SCRATCH
+long filter(instance* inst, __local long* groupScratch) {
+#else
 long filter(instance* inst) {
+#endif
     // Per-seed, so the flag reports this seed rather than any earlier one that
     // happened to run in the same work-item.
     inst->rngCache.reportedOverflow = false;
@@ -1204,6 +1702,11 @@ long filter(instance* inst) {
     shop sh = get_shop_instance(inst);
     double totalRate = get_total_rate(sh);
 
+    // One shop skeleton per ante, shared by every branch below it.
+    ann_skel skel;
+    ann_skel_init(&skel);
+    ann_skel* sk = &skel;
+
 #ifdef ANN_REPLAY_CHECK
     // Scaffolding for the claim the whole search rests on: an ante re-entered
     // from a snapshot redraws itself exactly. Walks every ante twice from the
@@ -1218,10 +1721,10 @@ long filter(instance* inst) {
         c1.pendingWidth = 0; c1.overstock = false; c1.overstockPlus = false;
         for (int ante = 1; ante <= ANN_LAST_ANTE; ante++) {
             ann_save(inst, &c1, &at_ante);
-            ann_ante_step(inst, &c1, &a1, ante, sh, totalRate, ANN_NONE, &d1);
+            ann_ante_step(inst, &c1, &a1, ante, sh, totalRate, ANN_NONE, (ann_skel*)0, &d1);
             ann_snap after; ann_save(inst, &c1, &after);
             ann_restore(inst, &c2, &at_ante);
-            ann_ante_step(inst, &c2, &a2, ante, sh, totalRate, ANN_NONE, &d2);
+            ann_ante_step(inst, &c2, &a2, ante, sh, totalRate, ANN_NONE, (ann_skel*)0, &d2);
             if (c2.colas != c1.colas || c2.copies != c1.copies || c2.fives != c1.fives ||
                 c2.ones != c1.ones || a2.jokerCards != a1.jokerCards ||
                 a2.eligCount != a1.eligCount) return 0;
@@ -1241,12 +1744,61 @@ long filter(instance* inst) {
     bestCtx.copies = 0; bestCtx.fives = 0; bestCtx.ones = 0; bestCtx.colas = 0;
     for (int d = 0; d < ANN_MAX_BRANCH_POINTS; d++) bestChoice[d] = ANN_NONE;
 
-#ifdef ANN_EXPLAIN
+#if defined(ANN_EXPLAIN) && !defined(GROUP_PER_SEED)
     instance pristine = *inst;   // ann_search leaves inst dirty
 #endif
     int uncAvail0 = 0;
     for (int index = 1; index <= (int)UNCOMMON_JOKERS[0]; index++)
         if (!i_locked(inst, UNCOMMON_JOKERS[index])) uncAvail0++;
+
+#ifdef ANN_INVARIANCE_CHECK
+    // The gate under the skeleton cache: is the skeleton really independent of
+    // which branch we are in? Walk every ante twice from the same state, the
+    // second time with 20 extra Uncommons locked -- the one thing a branch can
+    // do that the next one cannot -- and compare. Neither walk may use the
+    // cache, or the second would simply read back the first.
+    //
+    //   immolate -f analyze_naneinf_negatives -s SEED -n 1 -g 1 -c 0 \
+    //            --build_opts "-D ANN_INVARIANCE_CHECK"
+    //
+    // Returns the number of antes whose skeleton matched, so a pass over a pool
+    // is "every seed scores ANN_LAST_ANTE - ANN_FIRST_ANTE + 1".
+    {
+        ann_ante a1, a2;
+        ann_ctx c1, c2;
+        ann_log d1, d2;
+        ann_snap clean;
+        int matched = 0, identDiff = 0;
+        for (int ante = ANN_FIRST_ANTE; ante <= ANN_LAST_ANTE; ante++) {
+            c1.colas = 0; c1.copies = 0; c1.fives = 0; c1.ones = 0;
+            c1.seenCola = false; c1.negBlueprint = false; c1.negBrainstorm = false;
+            c1.pendingWidth = 0; c1.pendingLog = 0; c1.uncAvail = uncAvail0;
+            c1.overstock = false; c1.overstockPlus = false;
+            ann_save(inst, &c1, &clean);
+
+            ann_ante_step(inst, &c1, &a1, ante, sh, totalRate, ANN_NONE, (ann_skel*)0, &d1);
+
+            ann_restore(inst, &c2, &clean);
+            int locked = 0;
+            for (int k = 1; k <= (int)UNCOMMON_JOKERS[0] && locked < 20; k++)
+                if (!i_locked(inst, UNCOMMON_JOKERS[k])) { i_lock(inst, UNCOMMON_JOKERS[k]); locked++; }
+            c2.uncAvail -= locked;
+            ann_ante_step(inst, &c2, &a2, ante, sh, totalRate, ANN_NONE, (ann_skel*)0, &d2);
+
+            bool same = (a1.jokerCards == a2.jokerCards) && (a1.eligCount == a2.eligCount)
+                     && (a1.frameSize == a2.frameSize);
+            for (int j = 0; same && j < a1.jokerCards; j++)
+                same = (a1.cardIdx[j] == a2.cardIdx[j]) && (a1.rar[j] == a2.rar[j])
+                    && (a1.ed[j] == a2.ed[j]);
+            if (same) matched++;
+            for (int j = 0; j < a1.jokerCards; j++) if (a1.ident[j] != a2.ident[j]) identDiff++;
+            ann_restore(inst, &c1, &clean);
+        }
+        printf("skeleton identical in %d of %d antes; joker identities differing: %d\n",
+               matched, ANN_LAST_ANTE - ANN_FIRST_ANTE + 1, identDiff);
+        return matched;
+    }
+#endif
 
 #ifdef GROUP_PER_SEED
     // ---------------------------------------------------------------------
@@ -1288,6 +1840,14 @@ long filter(instance* inst) {
 
     long best = -1;
     int forced[ANN_MAX_BRANCH_POINTS];
+#ifdef ANN_EXPLAIN
+    // ann_search reports the best line of the ONE call it is given, so the
+    // lane has to hold on to the best across its own combinations rather than
+    // letting the last call overwrite them.
+    int tryChoice[ANN_MAX_BRANCH_POINTS];
+    ann_log tryLog[ANN_MAX_BRANCH_POINTS];
+    ann_ctx tryCtx;
+#endif
     for (long c = (long)lane; c < combos; c += (long)lanes) {
         long t = c;
         for (int d = splitDepth - 1; d >= 0; d--) {
@@ -1296,15 +1856,26 @@ long filter(instance* inst) {
             t /= (long)ar;
         }
         ann_restore(inst, &baseCtx, &base);
+#ifdef ANN_EXPLAIN
+        long sc = ann_search(inst, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
+                             tryChoice, tryLog, (const int*)0, (long*)0,
+                             splitDepth, forced, &tryCtx, sk);
+        if (sc > best) {
+            best = sc;
+            bestCtx = tryCtx;
+            for (int d = 0; d < M; d++) { bestChoice[d] = tryChoice[d]; bestLog[d] = tryLog[d]; }
+        }
+#else
         long sc = ann_search(inst, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
                              bestChoice, bestLog, (const int*)0, (long*)0,
-                             splitDepth, forced, (ann_ctx*)0);
+                             splitDepth, forced, (ann_ctx*)0, sk);
         if (sc > best) best = sc;
+#endif
     }
 #else
     long best = ann_search(inst, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
                            bestChoice, bestLog,
-                           (const int*)0, (long*)0, 0, (const int*)0, &bestCtx);
+                           (const int*)0, (long*)0, 0, (const int*)0, &bestCtx, sk);
 #endif
 
 #ifdef ANN_EXPLAIN
@@ -1317,15 +1888,65 @@ long filter(instance* inst) {
         // half. -D ANN_NO_ALTS skips it and prints the winning line only.
         long altBest[ANN_MAX_BRANCH_POINTS * 4];
         for (int i = 0; i < ANN_MAX_BRANCH_POINTS * 4; i++) altBest[i] = -1;
+        bool explainHere = true;
+#ifdef GROUP_PER_SEED
+        // Each lane searched a different share of the tree, so each holds the
+        // best line of its own share only. Elect the lane whose share held the
+        // winner; it is the only one with the state to print, and the only one
+        // that prints. Every lane computes the same index from the same scratch
+        // array, so nothing has to be broadcast to make the decision.
+        int winner = ann_group_argmax(groupScratch, lane, lanes, best);
+        explainHere = (lane == winner);
+
+        // The alternatives column prices every leaf against the WINNING line,
+        // so that line has to reach the lanes holding the other leaves. It is
+        // M ints; the scratch array is one long per lane, so this needs a group
+        // at least M lanes wide. Narrower groups keep the winning line and drop
+        // the column rather than printing a wrong one.
+        bool canAlt = (M <= lanes);
+        int refChoice[ANN_MAX_BRANCH_POINTS];
+        if (canAlt) {
+            barrier(CLK_LOCAL_MEM_FENCE);
+            if (lane == winner) for (int d = 0; d < M; d++) groupScratch[d] = (long)bestChoice[d];
+            barrier(CLK_LOCAL_MEM_FENCE);
+            for (int d = 0; d < M; d++) refChoice[d] = (int)groupScratch[d];
+        }
+#endif
 #ifndef ANN_NO_ALTS
         int again[ANN_MAX_BRANCH_POINTS];
         ann_log againLog[ANN_MAX_BRANCH_POINTS];
-        ann_search(&pristine, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
-                   again, againLog, bestChoice, altBest, 0, (const int*)0, (ann_ctx*)0);
+#ifdef GROUP_PER_SEED
+        if (canAlt) {
+            // Same split as the search above, so between them the lanes cover
+            // every leaf exactly once; each lane fills altBest for its own
+            // share and the group folds them together with a max, which is
+            // what altBest already is -- a per-(depth, choice) maximum.
+            for (long c = (long)lane; c < combos; c += (long)lanes) {
+                long t = c;
+                for (int d = splitDepth - 1; d >= 0; d--) {
+                    int ar = ann_arity(tagNeg[bpAnte[d]], bpAnte[d]);
+                    forced[d] = ann_choice_at(tagNeg[bpAnte[d]], bpAnte[d], (int)(t % (long)ar));
+                    t /= (long)ar;
+                }
+                ann_restore(inst, &baseCtx, &base);
+                ann_search(inst, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
+                           again, againLog, refChoice, altBest,
+                           splitDepth, forced, (ann_ctx*)0, sk);
+            }
+            for (int e = 0; e < M * 4; e++)
+                altBest[e] = ann_group_max(groupScratch, lane, lanes, altBest[e]);
+        }
 #else
+        ann_search(&pristine, sh, totalRate, uncAvail0, bpAnte, M, tagNeg,
+                   again, againLog, bestChoice, altBest, 0, (const int*)0, (ann_ctx*)0, sk);
+#endif
+#else
+#ifndef GROUP_PER_SEED
         (void)pristine;
 #endif
-        ann_explain(best, bpAnte, M, bestChoice, bestLog, altBest, &bestCtx);
+#endif
+        if (explainHere)
+            ann_explain(best, bpAnte, M, bestChoice, bestLog, altBest, &bestCtx);
     }
 #endif
     if (inst->rngCache.reportedOverflow) return ANN_CACHE_OVERFLOW;

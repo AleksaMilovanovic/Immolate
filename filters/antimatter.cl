@@ -2,7 +2,7 @@
 // draw plus its resample chain. The node array is the bulk of `instance`, which
 // is local memory on a GPU, so its size is occupancy.
 #ifndef CACHE_SIZE
-#define CACHE_SIZE 32
+#define CACHE_SIZE 128
 #endif
 // No deck path here, so drop the 52-item starting deck from the instance.
 #define INSTANCE_NO_DECK
@@ -20,7 +20,7 @@
 // actually allowed Overstock to arrive in ante 16, not 15. The `>=` below means
 // the number says what it does.
 #ifndef OS_OVERSTOCK_BY
-#define OS_OVERSTOCK_BY 6
+#define OS_OVERSTOCK_BY 10
 #endif
 #ifndef OS_PLUS_BY
 #define OS_PLUS_BY 11
@@ -53,8 +53,8 @@ long filter(instance* inst) {
         for (int i = 0; i < (int)(sizeof(OS_BOUGHT_VOUCHERS) / sizeof(item)); i++) {
             if (OS_BOUGHT_VOUCHERS[i] == v) { activate_voucher(inst, v); break; }
         }
-        if (v == Overstock) overstock = true;
-        if (v == Overstock_Plus) overstockPlus = true;
+        if (v == Blank) overstock = true;
+        if (v == Antimatter) overstockPlus = true;
         // Decided either way as soon as it can be: both found is a pass with no
         // reason to read further antes, and a missed deadline is a fail. The
         // old form ran all 38 antes whatever happened.
