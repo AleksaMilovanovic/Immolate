@@ -102,7 +102,39 @@ typedef struct SupplierWriter {
     uint64_t count;
     unsigned char* enc;    // scratch for one batch's encoded bytes
     size_t enc_cap;
+    int64_t* sortbuf;      // radix scratch, grown to the largest batch seen
+    size_t sortbuf_cap;
+    double t_sort, t_enc, t_io;   // where append() spends its time
 } sup_writer;
+
+// LSD radix sort over 6 bytes, for the ranks of one batch.
+//
+// qsort was the single biggest cost in a write-heavy run: 224 ms for a 3.2M-hit
+// batch, all of it on the host with the GPU stopped. Ranks are non-negative and
+// below 2^41 (s_from_rank's domain), so six 8-bit passes cover them, and six is
+// even -- the ping-pong lands back in `a` with no final copy. A pass whose keys
+// all share the same byte is skipped, which is the common case for the high
+// bytes since one batch spans at most --batch ranks; `moved` tracks parity so a
+// skipped pass cannot leave the result in the scratch buffer.
+//
+// Returns 0 if the scratch allocation fails, so the caller can fall back.
+static int sup_radix_sort(int64_t* a, int64_t* tmp, size_t n) {
+    if (n < 2) return 1;
+    int moved = 0;
+    for (int shift = 0; shift < 48; shift += 8) {
+        size_t count[256];
+        memset(count, 0, sizeof count);
+        for (size_t i = 0; i < n; i++) count[(size_t)((a[i] >> shift) & 0xFF)]++;
+        if (count[(size_t)((a[0] >> shift) & 0xFF)] == n) continue;  // one bucket
+        size_t run = 0;
+        for (int k = 0; k < 256; k++) { size_t c = count[k]; count[k] = run; run += c; }
+        for (size_t i = 0; i < n; i++) tmp[count[(size_t)((a[i] >> shift) & 0xFF)]++] = a[i];
+        int64_t* swap = a; a = tmp; tmp = swap;
+        moved ^= 1;
+    }
+    if (moved) memcpy(tmp, a, n * sizeof *a);   // odd number of passes: copy back
+    return 1;
+}
 
 static int sup_cmp_long(const void* a, const void* b) {
     int64_t x = *(const int64_t*)a, y = *(const int64_t*)b;
@@ -136,9 +168,26 @@ static int sup_writer_open(sup_writer* w, const char* path, const char* filter, 
 // atomic order) but every rank must exceed everything already in the file,
 // which holds when batches are walked in ascending rank order. Sorts in place.
 // Returns 0 on I/O error or ordering violation.
+static double sup_now(void) {
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 static int sup_writer_append(sup_writer* w, int64_t* ranks, size_t n) {
     if (n == 0) return 1;
-    qsort(ranks, n, sizeof ranks[0], sup_cmp_long);
+    double _t0 = sup_now();
+    // Radix when the scratch can be had, qsort otherwise: same ordering either
+    // way, so a failed allocation costs speed and nothing else.
+    if (w->sortbuf_cap < n) {
+        free(w->sortbuf);
+        w->sortbuf = (int64_t*)malloc(n * sizeof *w->sortbuf);
+        w->sortbuf_cap = w->sortbuf ? n : 0;
+    }
+    if (w->sortbuf) sup_radix_sort(ranks, w->sortbuf, n);
+    else qsort(ranks, n, sizeof ranks[0], sup_cmp_long);
+    double _t1 = sup_now();
+    w->t_sort += _t1 - _t0;
     if (ranks[0] <= w->prev) {
         fprintf(stderr, "Seed-supplier file: rank %lld is not above the last written rank %lld; batches must be ascending.\n", (long long)ranks[0], (long long)w->prev);
         return 0;
@@ -158,10 +207,13 @@ static int sup_writer_append(sup_writer* w, int64_t* ranks, size_t n) {
         while (d >= 0x80) { w->enc[len++] = (unsigned char)(d | 0x80); d >>= 7; }
         w->enc[len++] = (unsigned char)d;
     }
+    double _t2 = sup_now();
+    w->t_enc += _t2 - _t1;
     if (fwrite(w->enc, 1, len, w->f) != len) return 0;
     // Push every batch to the OS at once: a killed run then loses nothing and
     // leaves no partial record for --resume to trim.
     if (fflush(w->f) != 0) return 0;
+    w->t_io += sup_now() - _t2;
     w->prev = prev;
     w->count += n;
     return 1;
@@ -180,6 +232,9 @@ static int sup_writer_close(sup_writer* w) {
     }
     free(w->enc);
     w->enc = NULL;
+    free(w->sortbuf);
+    w->sortbuf = NULL;
+    w->sortbuf_cap = 0;
     return ok;
 }
 
@@ -371,6 +426,11 @@ typedef struct SupplierMulti {
     sup_header header;     // aggregate
     int has_pending;
     int64_t pending;
+    // Plain-text source (see sup_multi_open_text): ranks already parsed and
+    // held in memory, so the file readers above are unused.
+    int64_t* mem;
+    uint64_t mem_count;
+    uint64_t mem_pos;
 } sup_multi;
 
 // Header-only peek. Returns NULL and fills *h on success, else a message.
@@ -468,6 +528,213 @@ static int sup_discover_parts(const char* base, char** out_paths, int max, int* 
     return n;
 }
 
+// ---------------------------------------------------------------------------
+// Plain-text seed lists.
+//
+// A supplier file is the compact form, but the thing people actually have is a
+// filter's printed output ("SEED (score)" lines) or a hand-written list of
+// seeds. Both are accepted wherever a supplier file is, so a run can be piped
+// through a text file without a conversion step.
+//
+// A line counts as a seed only if it is exactly one seed token, or exactly
+// "SEED (number)". That is deliberately strict: Immolate's own banner lines go
+// into the same file when stdout is redirected, and several of them ("Done",
+// "Starting") are themselves valid base-35 seed strings. Requiring the whole
+// line to match stops those being searched as if they were seeds. Anything
+// rejected is counted and reported rather than passed over in silence.
+// ---------------------------------------------------------------------------
+#define SUP_SEED_CHARS "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+// Rank in the same bijective base-35 order seed_rank uses: "" = 0, "1" = 1,
+// "ZZZZZZZZ" = 2318107019760. Returns -1 if the token is not a seed.
+static int64_t sup_seed_to_rank(const char* tok, size_t len) {
+    if (len == 0 || len > 8) return -1;
+    int64_t rank = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = tok[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        const char* q = strchr(SUP_SEED_CHARS, c);
+        if (!q || c == '\0') return -1;
+        rank = rank * 35 + (int64_t)(q - SUP_SEED_CHARS) + 1;
+    }
+    return rank;
+}
+
+// One line -> a rank, or -1 if the line is not a seed line.
+static int64_t sup_parse_seed_line(const char* p, const char* end) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r')) p++;
+    while (end > p && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) end--;
+    if (p >= end || *p == '#') return -1;
+    const char* tok = p;
+    while (p < end && *p != ' ' && *p != '\t') p++;
+    int64_t rank = sup_seed_to_rank(tok, (size_t)(p - tok));
+    if (rank < 0) return -1;
+    if (p == end) return rank;                       // bare seed on its own line
+    // Otherwise the remainder must be exactly "(<digits>)": a printed score.
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    if (p >= end || *p != '(' || end[-1] != ')') return -1;
+    p++;
+    end--;
+    if (p >= end) return -1;
+    for (const char* q = p; q < end; q++) if (*q < '0' || *q > '9') return -1;
+    return rank;
+}
+
+// True if the file does not start with the supplier magic, i.e. treat as text.
+static int sup_is_text(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    char buf[8];
+    size_t got = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    if (got != sizeof buf) return 1;
+    return memcmp(buf, SUP_MAGIC, 8) != 0;
+}
+
+// Reads a whole file. Caller frees. Returns NULL and leaves *n untouched on
+// failure.
+static unsigned char* sup_slurp(const char* path, size_t* n) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return NULL; }
+    rewind(f);
+    unsigned char* buf = (unsigned char*)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+    *n = got;
+    return buf;
+}
+
+// Normalises a text file's bytes to plain ASCII in place, returning the new
+// length and advancing *start past any byte-order mark.
+//
+// This exists because of how people actually produce these files. Redirecting a
+// run with `>` in Windows PowerShell 5 writes UTF-16LE, and in PowerShell 7 it
+// writes UTF-8 with a BOM. Neither is exotic and both break naive line parsing:
+// the BOM glues itself to the first seed so that line is rejected, and UTF-16
+// puts a NUL after every character, which ends a C string after one byte -- the
+// file then looks like a single one-character seed and gets searched as one,
+// silently, which is far worse than failing. Seeds are ASCII, so the fix is to
+// recognise the encoding and flatten it before parsing.
+static size_t sup_normalise_text(unsigned char* buf, size_t n, size_t* start) {
+    *start = 0;
+    if (n >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) { *start = 3; return n; }
+
+    int utf16le = 0, utf16be = 0;
+    size_t from = 0;
+    if (n >= 2 && buf[0] == 0xFF && buf[1] == 0xFE) { utf16le = 1; from = 2; }
+    else if (n >= 2 && buf[0] == 0xFE && buf[1] == 0xFF) { utf16be = 1; from = 2; }
+    else if (n >= 4) {
+        // No BOM: infer from where the NUL bytes fall in the first stretch.
+        size_t look = n < 256 ? n : 256;
+        look &= ~(size_t)1;
+        size_t odd = 0, even = 0;
+        for (size_t i = 0; i < look; i += 2) {
+            if (buf[i] == 0) even++;
+            if (buf[i + 1] == 0) odd++;
+        }
+        size_t pairs = look / 2;
+        if (pairs >= 2 && odd == pairs && even == 0) utf16le = 1;
+        else if (pairs >= 2 && even == pairs && odd == 0) utf16be = 1;
+    }
+    if (!utf16le && !utf16be) return n;
+
+    size_t out = 0;
+    for (size_t i = from; i + 1 < n; i += 2) {
+        unsigned char lo = utf16le ? buf[i] : buf[i + 1];
+        unsigned char hi = utf16le ? buf[i + 1] : buf[i];
+        buf[out++] = (hi == 0 && lo < 0x80) ? lo : (unsigned char)'?';
+    }
+    return out;
+}
+
+// Reads seeds from one or more text files into memory, sorted and deduplicated
+// (the kernel path wants ascending ranks, and a pool pasted together from
+// several runs usually repeats some). Returns NULL on success.
+static const char* sup_multi_open_text(sup_multi* m, char** paths, int num) {
+    memset(m, 0, sizeof *m);
+    m->paths = (char**)malloc(sizeof(char*) * (size_t)(num > 0 ? num : 1));
+    if (!m->paths) return "out of memory";
+    size_t cap = 4096, n = 0;
+    int64_t* ranks = (int64_t*)malloc(sizeof(int64_t) * cap);
+    if (!ranks) { free(m->paths); return "out of memory"; }
+    uint64_t skipped = 0;
+    int kept = 0;
+    char sample[3][80];
+    int samples = 0;
+
+    for (int i = 0; i < num; i++) {
+        size_t raw = 0;
+        unsigned char* buf = sup_slurp(paths[i], &raw);
+        if (!buf) { fprintf(stderr, "Skipping %s: cannot read file.\n", paths[i]); continue; }
+        m->paths[kept++] = paths[i];
+        size_t start = 0;
+        size_t len = sup_normalise_text(buf, raw, &start);
+        const char* p = (const char*)buf + start;
+        const char* fileEnd = (const char*)buf + len;
+        while (p < fileEnd) {
+            const char* eol = p;
+            while (eol < fileEnd && *eol != '\n') eol++;
+            int64_t rank = sup_parse_seed_line(p, eol);
+            if (rank >= 0) {
+                if (n == cap) {
+                    size_t grown = cap * 2;
+                    int64_t* bigger = (int64_t*)realloc(ranks, sizeof(int64_t) * grown);
+                    if (!bigger) { free(ranks); free(buf); return "out of memory"; }
+                    ranks = bigger;
+                    cap = grown;
+                }
+                ranks[n++] = rank;
+            } else {
+                // Keep the first few rejects: if nothing parses, showing the
+                // caller what the lines actually looked like beats a bare count.
+                const char* t = p;
+                while (t < eol && (*t == ' ' || *t == '\t' || *t == '\r')) t++;
+                if (t < eol && *t != '#' && samples < 3) {
+                    size_t take = (size_t)(eol - t);
+                    if (take > sizeof sample[0] - 1) take = sizeof sample[0] - 1;
+                    memcpy(sample[samples], t, take);
+                    sample[samples][take] = '\0';
+                    for (size_t k = 0; k < take; k++)
+                        if ((unsigned char)sample[samples][k] < 0x20) sample[samples][k] = '?';
+                    samples++;
+                }
+                skipped++;
+            }
+            p = (eol < fileEnd) ? eol + 1 : fileEnd;
+        }
+        free(buf);
+    }
+    if (kept == 0) { free(ranks); return "no readable seed list files"; }
+    if (n == 0) {
+        free(ranks);
+        for (int i = 0; i < samples; i++)
+            fprintf(stderr, "  line %d was: \"%s\"\n", i + 1, sample[i]);
+        return "no seeds found (expected lines of \"SEED\" or \"SEED (score)\")";
+    }
+    qsort(ranks, n, sizeof(int64_t), sup_cmp_long);
+    size_t uniq = 1;
+    for (size_t i = 1; i < n; i++) if (ranks[i] != ranks[uniq - 1]) ranks[uniq++] = ranks[i];
+    if (skipped) fprintf(stderr, "Note: ignored %llu line(s) that are not seeds.\n", (unsigned long long)skipped);
+    if (uniq != n) fprintf(stderr, "Note: %llu duplicate seed(s) collapsed.\n", (unsigned long long)(n - uniq));
+    m->num_paths = kept;
+    m->mem = ranks;
+    m->mem_count = (uint64_t)uniq;
+    m->mem_pos = 0;
+    m->cur = -1;
+    memset(&m->header, 0, sizeof m->header);
+    snprintf(m->header.filter, sizeof m->header.filter, "%s", "(text list)");
+    m->header.count = (uint64_t)uniq;
+    m->header.start_rank = ranks[0];
+    m->header.num_seeds = ranks[uniq - 1] - ranks[0] + 1;
+    m->header.flags = SUP_FLAG_CLOSED;
+    return NULL;
+}
+
 // Opens a list of files. Each is validated; incomplete ones (still being
 // written, or truncated) are skipped with a message. Returns NULL on success.
 static const char* sup_multi_open(sup_multi* m, char** paths, int num) {
@@ -507,6 +774,17 @@ static int sup_multi_advance(sup_multi* m) {
 
 static size_t sup_multi_next(sup_multi* m, int64_t* out, size_t max) {
     size_t n = 0;
+    if (m->mem) {
+        // Honour a pushed-back rank the same way the file path does, so
+        // sup_multi_skip_through works identically on a text list.
+        if (max > 0 && m->has_pending) { out[n++] = m->pending; m->has_pending = 0; }
+        uint64_t left = m->mem_count - m->mem_pos;
+        size_t room = max - n;
+        size_t take = left < (uint64_t)room ? (size_t)left : room;
+        memcpy(out + n, m->mem + m->mem_pos, sizeof(int64_t) * take);
+        m->mem_pos += take;
+        return n + take;
+    }
     if (max > 0 && m->has_pending) { out[n++] = m->pending; m->has_pending = 0; }
     while (n < max) {
         if (!m->r_open && !sup_multi_advance(m)) break;
@@ -532,6 +810,8 @@ static void sup_multi_close(sup_multi* m) {
     m->r_open = 0;
     free(m->paths);
     m->paths = NULL;
+    free(m->mem);
+    m->mem = NULL;
 }
 
 #endif

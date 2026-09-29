@@ -1,0 +1,154 @@
+[
+ {
+  "label": "prim_iinit_K8",
+  "filter": "prim_iinit",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=8"
+ },
+ {
+  "label": "prim_iinit_K32",
+  "filter": "prim_iinit",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=32"
+ },
+ {
+  "label": "prim_sfromrank_indep_K8",
+  "filter": "prim_sfromrank_indep",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=8"
+ },
+ {
+  "label": "prim_sfromrank_indep_K32",
+  "filter": "prim_sfromrank_indep",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=32"
+ },
+ {
+  "label": "prim_stell_K32",
+  "filter": "prim_stell",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=32"
+ },
+ {
+  "label": "prim_stell_K128",
+  "filter": "prim_stell",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=128"
+ },
+ {
+  "label": "uni_prim_draw_inst_ctl",
+  "filter": "diag_uni_prim_draw_inst",
+  "n": 200000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DUNI_MASK=0 -DPRIM_K=32"
+ },
+ {
+  "label": "uni_prim_draw_inst_warp",
+  "filter": "diag_uni_prim_draw_inst",
+  "n": 200000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DUNI_MASK=31 -DPRIM_K=32"
+ },
+ {
+  "label": "uni_prim_draw_inst_launch",
+  "filter": "diag_uni_prim_draw_inst",
+  "n": 200000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DUNI_MASK=2147483647 -DPRIM_K=32"
+ },
+ {
+  "label": "uni_prim_empty_ctl",
+  "filter": "diag_uni_prim_empty",
+  "n": 200000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DUNI_MASK=0 -DPRIM_K=32"
+ },
+ {
+  "label": "uni_prim_empty_warp",
+  "filter": "diag_uni_prim_empty",
+  "n": 200000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DUNI_MASK=31 -DPRIM_K=32"
+ },
+ {
+  "label": "uni_prim_empty_launch",
+  "filter": "diag_uni_prim_empty",
+  "n": 200000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DUNI_MASK=2147483647 -DPRIM_K=32"
+ },
+ {
+  "label": "launch_prim_empty_n43008",
+  "filter": "prim_empty",
+  "n": 43008,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "fixed_n": true
+ },
+ {
+  "label": "launch_prim_empty_n172032",
+  "filter": "prim_empty",
+  "n": 172032,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "fixed_n": true
+ },
+ {
+  "label": "launch_prim_empty_n688128",
+  "filter": "prim_empty",
+  "n": 688128,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "fixed_n": true
+ },
+ {
+  "label": "prim_sfromrank_K16",
+  "filter": "prim_sfromrank",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=16"
+ },
+ {
+  "label": "prim_sfromrank_K64",
+  "filter": "prim_sfromrank",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=64"
+ },
+ {
+  "label": "prim_sfromrank_indep_K16",
+  "filter": "prim_sfromrank_indep",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=16"
+ },
+ {
+  "label": "prim_sfromrank_indep_K64",
+  "filter": "prim_sfromrank_indep",
+  "n": 100000000,
+  "cutoff": 999999999,
+  "mode": "bench",
+  "build_opts": "-DPRIM_K=64"
+ }
+]

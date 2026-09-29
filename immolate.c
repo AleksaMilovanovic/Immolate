@@ -69,7 +69,7 @@ static int cli_is_known_option(const char* text) {
     static const char* options[] = {
         "-h", "-f", "-s", "-n", "-c", "-p", "-d", "-g", "-l", "--build_opts",
         "--list_devices", "--no_cache", "--verbose_build", "--single_pass",
-        "--batch", "--progress", "--to", "--scores_to", "--from",
+        "--batch", "--progress", "--to", "--scores_to", "--from", "--group_per_seed", "--launch_seconds",
         "--to_parts", "--resume"
     };
     for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
@@ -211,9 +211,13 @@ int main(int argc, char **argv) {
     // both exist so a launch-configuration sweep needs no rebuild per point.
     unsigned int forcedLocal = 0;
     const char* extraBuildOpts = NULL;
+    int groupPerSeed = 0;  // --group_per_seed: one work-group per seed
     int noCache = 0;
     int verboseBuild = 0;
     int singlePass = 0;
+    // Plain single-pass searches are split into launches of about this many
+    // seconds each (0 = one launch for the whole range, the old behaviour).
+    double launchSeconds = 1.0;
     cl_long prefilterBatch = 1 << 26; // 67M seeds per pass-1 batch: 512 MB survivor buffer worst case
     int batchValid = 1;
     int progressEvery = 0;
@@ -239,8 +243,8 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in seed-supplier file FILE (made with --to) instead of a rank range. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
-            return 0;
+            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--launch_seconds <S>  In a plain single-pass search, split the range into kernel launches of about S seconds each (default 1). 0 runs the whole range as one launch. See docs/kernel_profile.md: on a display GPU under WDDM, single launches longer than ~2 s intermittently ran 7x slower.--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in FILE instead of a rank range. FILE is either a seed-supplier file (made with --to) or a plain-text seed list: a filter's printed \"SEED (score)\" output, or one seed per line. Text lists are sorted and deduplicated, and lines that are not seeds are counted and ignored. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--group_per_seed  Give each seed a whole work-group instead of one work-item, and define GROUP_PER_SEED for the filter, so a filter that splits its own work across get_local_id can use every lane on one seed. Only affects the --from print path. Use it when a filter's per-seed cost is large and uneven; it does nothing for cheap filters.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
+           return 0;
         }
         if (strcmp(argv[i],  "-p")==0) {
             if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
@@ -266,6 +270,12 @@ int main(int argc, char **argv) {
             if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
             forcedLocal = atoi(argv[i+1]);
             i++;
+        }
+        if (strcmp(argv[i],  "--group_per_seed")==0) {
+            // Hand each seed to a whole work-group so a filter can split its
+            // own search across the lanes. Only the --from print path uses it;
+            // see search_ranks_grouped.
+            groupPerSeed = 1;
         }
         if (strcmp(argv[i],  "--build_opts")==0) { // DIAGNOSTIC: extra clBuildProgram options
             if (i + 1 >= argc) { fprintf_s(stderr, "--build_opts requires a value.\n"); return EXIT_FAILURE; }
@@ -318,6 +328,11 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i],  "--single_pass")==0) {
             // Ignore the filter's prefilter and run the plain single-pass kernel.
             singlePass = 1;
+        }
+        if (strcmp(argv[i],  "--launch_seconds")==0) {
+            if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
+            launchSeconds = atof(argv[i+1]);
+            i++;
         }
         if (strcmp(argv[i],  "--batch")==0) {
             if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
@@ -550,6 +565,7 @@ int main(int argc, char **argv) {
     strcpy_s(include_path, sizeof include_path, "-I \"");
     strcat_s(include_path, sizeof include_path, executable_dir);
     strcat_s(include_path, sizeof include_path, "\"");
+    if (groupPerSeed) strcat_s(include_path, sizeof include_path, " -D GROUP_PER_SEED");
     if (extraBuildOpts) { // DIAGNOSTIC
         strcat_s(include_path, sizeof include_path, " ");
         strcat_s(include_path, sizeof include_path, extraBuildOpts);
@@ -671,7 +687,10 @@ int main(int argc, char **argv) {
         int ok = 1;
         char src_path[MAX_PATH + 64];
         snprintf(src_path, sizeof src_path, "%s%s%s%s%s.cl", executable_dir, PATH_SEPARATOR, filterDir, PATH_SEPARATOR, filter);
-        h = fnv1a_file(h, src_path, &ok);
+        // Follows #includes: a wrapper filter's own source says nothing about
+        // the filter it wraps, and reusing a binary across a change to that is
+        // silent and produces wrong results.
+        h = fnv1a_source_tree(h, src_path, executable_dir, &ok, 4, 1);
         static const char* libFiles[] = {"immolate.cl", "util.cl", "seed.cl", "items.cl", "debug.cl", "cache.cl", "instance.cl", "functions.cl"};
         for (size_t i = 0; i < sizeof(libFiles) / sizeof(libFiles[0]); i++) {
             snprintf(src_path, sizeof src_path, "%s%slib%s%s", executable_dir, PATH_SEPARATOR, PATH_SEPARATOR, libFiles[i]);
@@ -701,7 +720,7 @@ int main(int argc, char **argv) {
                 if (ssKernelProgram != NULL) clReleaseProgram(ssKernelProgram);
                 ssKernelProgram = NULL;
             } else {
-                printf_s("Loaded compiled kernel from cache (sources hashed under %s%slib and %s%s%s).\n", executable_dir, PATH_SEPARATOR, executable_dir, PATH_SEPARATOR, filterDir);
+                printf_s("Loaded compiled kernel from cache (%s%s%s.cl with its includes, and %s%slib).\n", filterDir, PATH_SEPARATOR, filter, executable_dir, PATH_SEPARATOR);
                 loadedFromCache = 1;
             }
             free(bin);
@@ -792,6 +811,11 @@ build_program:
     clErrCheck(err, "clCreateKernel - Creating search_collect kernel");
     cl_kernel ranksCollectKernel = clCreateKernel(ssKernelProgram, "search_ranks_collect", &err);
     clErrCheck(err, "clCreateKernel - Creating search_ranks_collect kernel");
+    cl_kernel ranksGroupedKernel = NULL;
+    if (groupPerSeed) {
+        ranksGroupedKernel = clCreateKernel(ssKernelProgram, "search_ranks_grouped", &err);
+        clErrCheck(err, "clCreateKernel - Creating search_ranks_grouped kernel");
+    }
     cl_kernel scoresKernel = NULL;
     if (scoresToFile) {
         scoresKernel = clCreateKernel(ssKernelProgram, "search_scores", &err);
@@ -815,6 +839,10 @@ build_program:
     clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
     err = clSetKernelArg(collectKernel, 2, sizeof(cutoff), &cutoff);
     clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
+    if (ranksGroupedKernel) {
+        err = clSetKernelArg(ranksGroupedKernel, 2, sizeof(cutoff), &cutoff);
+        clErrCheck(err, "clSetKernelArg - Adding cutoff to grouped kernel");
+    }
     err = clSetKernelArg(ranksCollectKernel, 2, sizeof(cutoff), &cutoff);
     clErrCheck(err, "clSetKernelArg - Adding cutoff argument");
 
@@ -847,6 +875,11 @@ build_program:
     }
     size_t globalSize = (size_t)numGroups * localSize;
     printf_s("Launching %zu work-groups of %zu work-items (%zu total).\n", (size_t)numGroups, localSize, globalSize);
+    if (ranksGroupedKernel) {
+        err = clSetKernelArg(ranksGroupedKernel, 3, sizeof(cl_long) * localSize, NULL);
+        clErrCheck(err, "clSetKernelArg - Adding grouped reduction scratch");
+        printf_s("One work-group per seed: each seed's search is split across %zu lanes.\n", localSize);
+    }
 
     // Seed-supplier input.
     sup_multi reader;
@@ -856,6 +889,19 @@ build_program:
         // only) and a plain FILE, if one also exists, is ignored: it can only be
         // a leftover from another run, since a parts run never writes the base
         // name. Only when there are no parts is FILE read as a single file.
+        // A plain-text seed list -- a filter's printed output, or one seed per
+        // line -- is accepted wherever a supplier file is. Part discovery and
+        // the header checks below are meaningless for one, so it branches here.
+        int fromText = sup_is_text(fromFiles[0]);
+        if (fromText) {
+            const char* terr = sup_multi_open_text(&reader, fromFiles, numFromFiles);
+            if (terr) {
+                fprintf_s(stderr, "Cannot read seed list %s: %s.\n", fromFile, terr);
+                exit(EXIT_FAILURE);
+            }
+            printf_s("Reading %llu seeds from the text list %s.\n",
+                     (unsigned long long)reader.header.count, fromFiles[0]);
+        } else
         if (numFromFiles == 1) {
             int K = 0;
             int found = sup_discover_parts(fromFiles[0], fromFiles + 1, SUP_MAX_FILES - 1, &K);
@@ -872,12 +918,13 @@ build_program:
                 fclose(probe);
             }
         }
-        const char* rerr = sup_multi_open(&reader, fromFiles, numFromFiles);
+        const char* rerr = fromText ? NULL : sup_multi_open(&reader, fromFiles, numFromFiles);
         if (rerr) {
             fprintf_s(stderr, "Cannot read seed-supplier file %s: %s.\n", fromFile, rerr);
             exit(EXIT_FAILURE);
         }
-        if (reader.num_paths == 1) printf_s("Reading %llu seeds from %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.paths[0], reader.header.filter, (long long)reader.header.cutoff);
+        if (fromText) { /* already reported above */ }
+        else if (reader.num_paths == 1) printf_s("Reading %llu seeds from %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.paths[0], reader.header.filter, (long long)reader.header.cutoff);
         else printf_s("Reading %llu seeds from %d files, %s .. %s (filter %s, cutoff %lld).\n", (unsigned long long)reader.header.count, reader.num_paths, reader.paths[0], reader.paths[reader.num_paths - 1], reader.header.filter, (long long)reader.header.cutoff);
     }
     // Seed-supplier output. Opened before the search so a bad path fails fast.
@@ -1023,10 +1070,55 @@ build_program:
         }
     } else if (!twoPass && !toFile && !fromFile) {
         // Plain single pass: print straight from the kernel.
-        err = enqueue_1d(queue, ssKernel, &globalSize, &localSize, numGroups);
-        clErrCheck(err, "clEnqueueNDRangeKernel - Executing OpenCL kernel");
-        err = clFlush(queue);
-        err = clFinish(queue);
+        //
+        // The range is walked in launches of about --launch_seconds each rather
+        // than one launch for everything. The kernel derives every seed from
+        // start_rank + global id, so splitting the range changes nothing but
+        // the launch boundaries; the output was never ordered. Measured on an
+        // RTX 5080 under WDDM (docs/kernel_profile.md): 2 of 6 identical 3.3 s
+        // single launches of deep_negative_shops ran 21.7 s and 24.8 s, while
+        // the same work in ten 0.3 s launches took 2.96 s every time, and never
+        // once slower. The first launch is small (4 seeds per lane) and each
+        // next one is scaled by measured time towards the target, at most 4x
+        // per step, so cheap and expensive filters both converge in a few
+        // launches. Launch overhead is tens of microseconds once the module is
+        // loaded, so ~1 s launches cost nothing measurable.
+        cl_long batchStart = startRank;
+        cl_long remaining = numSeeds;
+        cl_long thisBatch = launchSeconds > 0 ? (cl_long)globalSize * 4 : numSeeds;
+        long long launches = 0;
+        while (remaining > 0) {
+            if (thisBatch > remaining) thisBatch = remaining;
+            err = clSetKernelArg(ssKernel, 0, sizeof(batchStart), &batchStart);
+            clErrCheck(err, "clSetKernelArg - Setting launch start rank");
+            err = clSetKernelArg(ssKernel, 1, sizeof(thisBatch), &thisBatch);
+            clErrCheck(err, "clSetKernelArg - Setting launch seed count");
+            double t0 = wall_seconds();
+            err = enqueue_1d(queue, ssKernel, &globalSize, &localSize, numGroups);
+            clErrCheck(err, "clEnqueueNDRangeKernel - Executing OpenCL kernel");
+            err = clFlush(queue);
+            err = clFinish(queue);
+            clErrCheck(err, "clFinish - Waiting for search launch");
+            double dt = wall_seconds() - t0;
+            batchStart += thisBatch;
+            remaining -= thisBatch;
+            launches++;
+            if (progressEvery > 0 && launches % progressEvery == 0) {
+                fprintf(stderr, "[%lld of %lld seeds, %.1fs]\n",
+                        (long long)(numSeeds - remaining), (long long)numSeeds, wall_seconds() - wallBegin);
+            }
+            if (launchSeconds > 0) {
+                double scale = dt > 1e-4 ? launchSeconds / dt : 4.0;
+                if (scale > 4.0) scale = 4.0;
+                if (scale < 0.25) scale = 0.25;
+                double next = (double)thisBatch * scale;
+                if (next > 4e18) next = 4e18;
+                thisBatch = (cl_long)next;
+                cl_long lanes = (cl_long)globalSize;
+                if (thisBatch < lanes) thisBatch = lanes;
+                thisBatch = (thisBatch / lanes) * lanes; // whole waves: every lane gets the same count
+            }
+        }
     } else {
         // Batched search. Seeds come from a rank range (walked in batches of
         // --batch) or from a supplier file (decoded in chunks); passing seeds go
@@ -1051,6 +1143,20 @@ build_program:
             hostRanks = (cl_long*)malloc(sizeof(cl_long) * (size_t)batchSeeds);
             if (!hostRanks) { fprintf_s(stderr, "Out of memory for a %lld-seed batch; lower --batch.\n", (long long)batchSeeds); exit(EXIT_FAILURE); }
         }
+        // A batch's hits are sorted and encoded on the host, which for a
+        // permissive filter is far more time than the kernel itself -- and the
+        // loop is otherwise strictly serial, so the device sits idle throughout.
+        // Holding them here lets that work happen AFTER the next batch is
+        // enqueued, so it overlaps the device instead of blocking it. Under
+        // --from, hostRanks is also the source staging and is overwritten by the
+        // next batch, which is why this is a second buffer rather than a flag.
+        cl_long* pendRanks = NULL;
+        cl_uint pendHits = 0;
+        if (toFile) {
+            pendRanks = (cl_long*)malloc(sizeof(cl_long) * (size_t)batchSeeds);
+            // Not fatal: without it the writes simply stay synchronous.
+            if (!pendRanks) printf_s("Note: no memory for overlapped output; writing synchronously.\n");
+        }
         // Pass 1 (prefilter) reads a range, writes survivors to listBuf.
         if (twoPass) {
             err = clSetKernelArg(preKernel, 2, sizeof(cl_mem), &listBuf);
@@ -1067,6 +1173,10 @@ build_program:
         // List kernels read listBuf; the collecting one writes hits to outBuf.
         err = clSetKernelArg(ranksKernel, 0, sizeof(cl_mem), &listBuf);
         clErrCheck(err, "clSetKernelArg - Adding ranks buffer argument");
+        if (ranksGroupedKernel) {
+            err = clSetKernelArg(ranksGroupedKernel, 0, sizeof(cl_mem), &listBuf);
+            clErrCheck(err, "clSetKernelArg - Adding ranks buffer to grouped kernel");
+        }
         err = clSetKernelArg(ranksCollectKernel, 0, sizeof(cl_mem), &listBuf);
         clErrCheck(err, "clSetKernelArg - Adding ranks buffer argument");
         if (outBuf) {
@@ -1084,7 +1194,35 @@ build_program:
         cl_long totalSurvivors = 0; // pass-1 survivors (two-pass only)
         cl_long totalOut = 0;       // seeds written to --to
         int batches = 0;
+        // Where a run's wall time goes. Printed with --progress, because
+        // "the GPU is only busy half the time" is otherwise a guess: these
+        // separate waiting for the device from sorting and writing its output.
+        double tSource = 0.0, tPre = 0.0, tEnqueue = 0.0, tDevice = 0.0, tRead = 0.0, tOutput = 0.0;
+        // enqueue split four ways: the blocking hit-count reset, the argument
+        // setup, the launch itself, and the flush that submits it. They look
+        // alike from outside and behave nothing alike.
+        double tReset = 0.0, tArgs = 0.0, tLaunch = 0.0, tFlush = 0.0;
+        double tMark = 0.0;
+        // Running-mark accounting: each boundary charges the time since the
+        // last, so the phases necessarily sum to the loop's wall time. The
+        // earlier timers wrapped only two blocking points and left most of a
+        // run unattributed, which is exactly the thing that needed finding.
+        #define PHASE(acc) do { double _n = wall_seconds(); (acc) += _n - tMark; tMark = _n; } while (0)
+        // Writes the batch held from last time. Kept a macro so it can sit in
+        // the one spot that matters -- between enqueueing a batch and blocking
+        // on it -- without threading half the loop's locals through a call.
+        #define FLUSH_PENDING() do { \
+            if (pendHits > 0) { \
+                if (!sup_writer_append(&writer, (int64_t*)pendRanks, pendHits)) { \
+                    fprintf_s(stderr, "Failed writing to %s.\n", toFile); \
+                    exit(EXIT_FAILURE); \
+                } \
+                totalOut += pendHits; \
+                pendHits = 0; \
+            } \
+        } while (0)
         const cl_uint zero = 0;
+        tMark = wall_seconds();
         for (;;) {
             // ---- Source: fill either a range or listBuf for this batch ----
             cl_long thisBatch = 0;   // range size, or list length
@@ -1102,6 +1240,7 @@ build_program:
                 err = clEnqueueWriteBuffer(queue, listBuf, CL_TRUE, 0, sizeof(cl_long) * got, hostRanks, 0, NULL, NULL);
                 clErrCheck(err, "clEnqueueWriteBuffer - Uploading seed list chunk");
                 haveList = 1;
+                PHASE(tSource);
             } else {
                 if (totalIn >= numSeeds) break;
                 thisBatch = numSeeds - totalIn < batchCap ? numSeeds - totalIn : batchCap;
@@ -1118,6 +1257,7 @@ build_program:
                     cl_uint survivors = 0;
                     err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(survivors), &survivors, 0, NULL, NULL);
                     clErrCheck(err, "clEnqueueReadBuffer - Reading survivor count");
+                    PHASE(tPre);
                     totalSurvivors += survivors;
                     totalIn += thisBatch;
                     thisBatch = survivors;
@@ -1129,15 +1269,22 @@ build_program:
             cl_uint hits = 0;
             if (haveList) {
                 if (thisBatch > 0) {
-                    cl_kernel k = toFile ? ranksCollectKernel : ranksKernel;
+                    cl_kernel k = toFile ? ranksCollectKernel
+                                        : (ranksGroupedKernel ? ranksGroupedKernel : ranksKernel);
                     err = clSetKernelArg(k, 1, sizeof(thisBatch), &thisBatch);
                     clErrCheck(err, "clSetKernelArg - Adding number of ranks");
+                    PHASE(tArgs);
                     if (toFile) {
                         err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
                         clErrCheck(err, "clEnqueueWriteBuffer - Resetting hit count");
+                        PHASE(tReset);
                     }
                     // The list is short compared with a batch; do not launch more lanes than there is work.
-                    size_t listGroups = ((size_t)thisBatch + localSize - 1) / localSize;
+                    // One group per seed under --group_per_seed; otherwise one
+                    // work-item per seed as before.
+                    size_t listGroups = ranksGroupedKernel
+                        ? (size_t)thisBatch
+                        : ((size_t)thisBatch + localSize - 1) / localSize;
                     if (listGroups > (size_t)numGroups) listGroups = numGroups;
                     size_t listGlobal = listGroups * localSize;
                     // Via enqueue_1d, not a bare clEnqueueNDRangeKernel: this is
@@ -1147,9 +1294,21 @@ build_program:
                     // failure instead of a halve-and-retry.
                     err = enqueue_1d(queue, k, &listGlobal, &localSize, (unsigned int)listGroups);
                     clErrCheck(err, "clEnqueueNDRangeKernel - Executing ranks kernel");
+                    PHASE(tLaunch);
                     if (toFile) {
+                        // Without this the overlap below is a lie: an enqueued
+                        // command need not reach the device until a flush or a
+                        // blocking call, so the driver is free to sit on the
+                        // kernel while the host sorts and only start it at the
+                        // blocking read -- serialising exactly what this is
+                        // meant to overlap.
+                        clFlush(queue);
+                        PHASE(tFlush);
+                        FLUSH_PENDING();   // now genuinely concurrent with it
+                        PHASE(tOutput);
                         err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
                         clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
+                        PHASE(tDevice);
                     } else {
                         err = clFinish(queue);
                         clErrCheck(err, "clFinish - Waiting for ranks kernel");
@@ -1160,27 +1319,44 @@ build_program:
                 // Range, collecting (single pass with --to).
                 err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
                 clErrCheck(err, "clEnqueueWriteBuffer - Resetting hit count");
+                PHASE(tReset);
                 err = clSetKernelArg(collectKernel, 0, sizeof(batchStart), &batchStart);
                 clErrCheck(err, "clSetKernelArg - Adding batch start rank");
                 err = clSetKernelArg(collectKernel, 1, sizeof(thisBatch), &thisBatch);
                 clErrCheck(err, "clSetKernelArg - Adding batch size");
+                PHASE(tArgs);
                 err = enqueue_1d(queue, collectKernel, &globalSize, &localSize, numGroups);
                 clErrCheck(err, "clEnqueueNDRangeKernel - Executing collect kernel");
+                PHASE(tLaunch);
+                clFlush(queue);    // submit it before the host goes away; see above
+                PHASE(tFlush);
+                FLUSH_PENDING();   // now genuinely concurrent with it
+                PHASE(tOutput);
                 err = clEnqueueReadBuffer(queue, countBuf, CL_TRUE, 0, sizeof(hits), &hits, 0, NULL, NULL);
                 clErrCheck(err, "clEnqueueReadBuffer - Reading hit count");
+                PHASE(tDevice);
                 totalIn += thisBatch;
             }
 
             // ---- Sink: append this batch's hits to the supplier file ----
             if (toFile && hits > 0) {
-                err = clEnqueueReadBuffer(queue, outBuf, CL_TRUE, 0, sizeof(cl_long) * hits, hostRanks, 0, NULL, NULL);
+                cl_long* dst = pendRanks ? pendRanks : hostRanks;
+                err = clEnqueueReadBuffer(queue, outBuf, CL_TRUE, 0, sizeof(cl_long) * hits, dst, 0, NULL, NULL);
                 clErrCheck(err, "clEnqueueReadBuffer - Reading collected ranks");
-                if (!sup_writer_append(&writer, (int64_t*)hostRanks, hits)) {
-                    fprintf_s(stderr, "Failed writing to %s.\n", toFile);
-                    exit(EXIT_FAILURE);
+                PHASE(tRead);
+                if (pendRanks) {
+                    pendHits = hits;   // written once the next batch is running
+                } else {
+                    if (!sup_writer_append(&writer, (int64_t*)hostRanks, hits)) {
+                        fprintf_s(stderr, "Failed writing to %s.\n", toFile);
+                        exit(EXIT_FAILURE);
+                    }
+                    totalOut += hits;
                 }
-                totalOut += hits;
             }
+            // A held batch belongs to the part that was open when it was
+            // collected, so it has to land before the writer moves on.
+            if (toFile && toParts > 1 && totalIn >= partEnd) FLUSH_PENDING();
             // Part boundary reached: close this part and open the next.
             if (toFile && toParts > 1 && totalIn >= partEnd && totalIn < numSeeds && partIndex < toParts) {
                 if (!sup_writer_close(&writer)) {
@@ -1199,7 +1375,20 @@ build_program:
             }
             batches++;
             if (progressEvery > 0 && batches % progressEvery == 0) {
-                double elapsed = (double)(clock() - begin) / CLOCKS_PER_SEC;
+                // Wall time, not clock(): clock() is process CPU summed over
+                // threads, so on a CPU device it reads several times the real
+                // elapsed time, and now that the host does real work during a
+                // batch instead of spinning in clFinish it overstates on a GPU
+                // too. wallBegin is the same origin the final report uses.
+                double elapsed = wall_seconds() - wallBegin;
+                // The same split the end-of-run line gives, every batch, so a
+                // long run can be diagnosed without waiting for it to finish.
+                if (toFile) {
+                    double acc = tSource + tPre + tReset + tArgs + tLaunch + tFlush + tDevice + tRead + tOutput;
+                    fprintf(stderr, "[src %.1f | pre %.1f | reset %.1f args %.1f launch %.1f flush %.1f | dev %.1f | readhits %.1f | out %.1f | other %.1f]\n",
+                            tSource, tPre, tReset, tArgs, tLaunch, tFlush, tDevice, tRead, tOutput,
+                            elapsed - acc);
+                }
                 if (twoPass) fprintf(stderr, "[%lld / %lld seeds, %lld survivors, %lld written, %.1fs]\n",
                         (long long)totalIn, (long long)numSeeds, (long long)totalSurvivors, (long long)totalOut, elapsed);
                 else fprintf(stderr, "[%lld seeds, %lld written, %.1fs]\n", (long long)totalIn, (long long)totalOut, elapsed);
@@ -1207,8 +1396,15 @@ build_program:
             }
         }
         err = clFinish(queue);
+        FLUSH_PENDING();   // the last batch is still held
+        #undef FLUSH_PENDING
         if (twoPass) printf_s("Prefilter passed %lld of %lld seeds.\n", (long long)totalSurvivors, (long long)totalIn);
         if (fromFile) printf_s("Searched %lld seeds from %s.\n", (long long)totalIn, fromFile);
+        if (progressEvery > 0 && toFile)
+            printf_s("Time: src %.1f, prefilter %.1f, reset %.1f, args %.1f, launch %.1f, flush %.1f, device %.1f, readhits %.1f, output %.1f (sort %.1f enc %.1f io %.1f), other %.1f.\n",
+                     tSource, tPre, tReset, tArgs, tLaunch, tFlush, tDevice, tRead, tOutput,
+                     writer.t_sort, writer.t_enc, writer.t_io,
+                     (wall_seconds() - wallBegin) - (tSource + tPre + tReset + tArgs + tLaunch + tFlush + tDevice + tRead + tOutput));
         if (toFile) {
             if (!sup_writer_close(&writer)) {
                 fprintf_s(stderr, "Failed closing %s.\n", partPath);
@@ -1221,6 +1417,7 @@ build_program:
         }
         if (fromFile) sup_multi_close(&reader);
         free(hostRanks);
+        free(pendRanks);
         clReleaseMemObject(listBuf);
         if (outBuf) clReleaseMemObject(outBuf);
         clReleaseMemObject(countBuf);
@@ -1232,6 +1429,7 @@ build_program:
     clReleaseKernel(ranksKernel);
     clReleaseKernel(collectKernel);
     clReleaseKernel(ranksCollectKernel);
+    if (ranksGroupedKernel) clReleaseKernel(ranksGroupedKernel);
     err = clReleaseKernel(ssKernel);
     err = clReleaseProgram(ssKernelProgram);
     err = clReleaseCommandQueue(queue);

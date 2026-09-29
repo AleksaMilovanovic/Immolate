@@ -46,9 +46,25 @@ double fract(double f) {
 // result is bit-identical to a / b. Verified on the host against `/` for 3e8
 // divisors and 4e7 full pseudohash strings, with the float seed perturbed by
 // up to +-4 ulp to cover approximate native reciprocals: zero mismatches.
+// Newton seed for div_pos: an approximate reciprocal of b good to ~24 bits.
+// NVIDIA exposes an fp64 approximation (MUFU.RCP64H) that saves the two
+// fp64<->fp32 conversions of the float route; elsewhere the float route stays.
+// The result of div_pos does not depend on which seed is used (Newton and the
+// Markstein step make it correctly rounded from any seed this accurate);
+// verified bit-identical over 5.1e9 inputs including 0, inf and NaN with
+// diagnostics/probe_phstep_variants.cl. Measured: -3.5% per node creation.
+inline double ph_rcp_seed(double b) {
+#ifdef __NV_CL_C_VERSION
+    double r;
+    asm("rcp.approx.ftz.f64 %0, %1;" : "=d"(r) : "d"(b));
+    return r;
+#else
+    return (double)(1.0f / (float)b);
+#endif
+}
 inline double div_pos(double a, double b) {
     if (b < 1e-37) return a / b; // covers b == 0 (gives +inf like `/`) and tiny b where the float reciprocal would overflow
-    double r  = (double)(1.0f / (float)b);
+    double r  = ph_rcp_seed(b);
     double e0 = fma(-b, r, 1.0);
     double y1 = fma(e0, r, r);
     double e1 = e0 * e0;
@@ -73,9 +89,16 @@ inline double div_pos(double a, double b) {
 // counting down. Exactly the loop body of pseudohash() below.
 inline double ph_step(double num, int c, int pos) {
     double q = div_pos(1.1239285023, num);
-    long int_part = (q*c*3.141592653589793116+3.141592653589793116*(pos))*PH_SCALE;
+    // trunc() is what the original `(double)(long)x` computed for every finite
+    // |x| < 2^63, and diagnostics/probe_phstep_variants.cl confirmed the same
+    // bits on inf and NaN inputs too; it is one fp64 op instead of two 64-bit
+    // conversions (measured: -3% per node creation). A per-position table for
+    // pi*pos and fract(pi*pos) was tried in the same probe: exact, but it
+    // measured no gain on node creation and slowed a dependent ph_step chain,
+    // so the multiply stays.
+    double int_part = trunc((q*c*3.141592653589793116+3.141592653589793116*(pos))*PH_SCALE);
     double fract_part = fract(fract((q*c*3.141592653589793116)*PH_SCALE)+fract((3.141592653589793116*(pos))*PH_SCALE));
-    return fract(((double)(int_part)+fract_part)/PH_SCALE);
+    return fract((int_part+fract_part)/PH_SCALE);
 }
 // Kept for reference and for tests; the RNG path no longer builds strings.
 double pseudohash(const text* s) {

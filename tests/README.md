@@ -45,6 +45,28 @@ Every fixture is a thin `#include` wrapper around the live filter, so none can d
 register allocation is not controlled and no other ratio in the run is readable. See
 [docs/optimization.md](../docs/optimization.md).
 
+## Kernel cost profile
+
+`docs/kernel_profile.md` breaks the kernel's time down by hardware resource and
+library primitive (fp64 pipe, divergence, per-seed floor, cache, memory, host).
+Its fixtures are `diagnostics/prim_*.cl` (primitive microbenchmarks),
+`diagnostics/diag_count_*.cl` (operation counters, `DIAG_COUNTERS`) and
+`diagnostics/diag_uni_*.cl` (warp-uniform seed probes). Reproduce with the GPU
+otherwise idle:
+
+```bash
+python tests/profile_kernel.py tests/kernel_profile/primitives.json
+python tests/profile_kernel.py tests/kernel_profile/followup.json
+python tests/profile_kernel.py tests/kernel_profile/dns_fixed.json
+python tests/profile_analyze.py
+python tests/ptx_mix.py .kernel_cache/<bin> search   # static PTX mix of one kernel
+```
+
+`tests/kernel_profile/verify.json` re-measures the affected primitives and the five sample
+filters after a library change; it pins `--launch_seconds 0` so kernel timings stay comparable
+with the baseline. Compare two result files with a drift reference the change cannot touch (the
+draw slope, `prim_draw_inst`), not with the primitive being changed.
+
 ## Shorter profiles
 
 ```bash

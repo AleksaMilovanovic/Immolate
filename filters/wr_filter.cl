@@ -160,25 +160,31 @@ long wr_deep(instance* inst) {
     bool foundBlueprint = false;
 
     for (int ante = 1; ante <= 2; ante++) {
+        // Shop window in dense phases (shop_items_dense); same draws as
+        // wr_shop_joker per slot (type, rarity, identity), phase by phase.
         int shopItems = (ante == 1) ? 4 : 10;
-        for (int i = 1; i <= shopItems; i++) {
-            item joker = wr_shop_joker(inst, ante);
-            /* Reroll logic previously lived here; see the commented block above. */
+        shopitem window[10];
+        shop_items_dense(inst, ante, shopItems, window, SHOP_IDENT_JOKERS);
+        for (int i = 0; i < shopItems; i++) {
+            item joker = window[i].type == ItemType_Joker ? window[i].joker.joker : RETRY;
             if (joker == Brainstorm) foundBrainstorm = true;
             if (joker == Blueprint) foundBlueprint = true;
         }
 
+        // Pack types first (one node), then each lane walks its own Buffoon list.
         int packs = (ante == 1) ? 3 : 6;
+        int buffoon[6];
+        int nb = 0;
         for (int p = 1; p <= packs; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
+            if (_pack.type == Buffoon_Pack) buffoon[nb++] = _pack.size;
+        }
+        for (int q = 0; q < nb; q++) {
             item jokers[5];
-
-            if (_pack.type == Buffoon_Pack) {
-                buffoon_pack(jokers, _pack.size, inst, ante);
-                for (int j = 0; j < _pack.size; j++) {
-                    if (jokers[j] == Brainstorm) foundBrainstorm = true;
-                    if (jokers[j] == Blueprint) foundBlueprint = true;
-                }
+            buffoon_pack(jokers, buffoon[q], inst, ante);
+            for (int j = 0; j < buffoon[q]; j++) {
+                if (jokers[j] == Brainstorm) foundBrainstorm = true;
+                if (jokers[j] == Blueprint) foundBlueprint = true;
             }
         }
     }
@@ -236,35 +242,45 @@ long wr_deep(instance* inst) {
 	}
 
 
-        // Shop checks for diet colas and naturally negative copy jokers
+        // Shop checks for diet colas and naturally negative copy jokers.
+        // Dense windows of SHOP_MAX_ITEMS slots (shop_items_dense): the same
+        // type, rarity, identity and edition draws as wr_shop_joker_edition
+        // per slot, phase by phase. Only the window is kept, not the shop.
         int shopItems = shopSizes[ante - 3];
-        for (int i = 1; i <= shopItems; i++) {
-            item edition = No_Edition;
-            item joker = wr_shop_joker_edition(inst, ante, &edition);
-            if (joker == RETRY) continue;
-            if (joker == Diet_Cola) {
-                dietColaCount++;
-                continue;
+        for (int base = 0; base < shopItems; base += SHOP_MAX_ITEMS) {
+            int m = shopItems - base < SHOP_MAX_ITEMS ? shopItems - base : SHOP_MAX_ITEMS;
+            shopitem window[SHOP_MAX_ITEMS];
+            shop_items_dense(inst, ante, m, window, SHOP_IDENT_JOKERS | SHOP_EDITIONS);
+            for (int i = 0; i < m; i++) {
+                if (window[i].type != ItemType_Joker) continue;
+                item joker = window[i].joker.joker;
+                if (joker == Diet_Cola) {
+                    dietColaCount++;
+                    continue;
+                }
+                if (window[i].joker.edition == Negative && (joker == Brainstorm || joker == Blueprint)) negativeCopyJokerCount++;
             }
-            if (edition == Negative && (joker == Brainstorm || joker == Blueprint)) negativeCopyJokerCount++;
         }
 
-        // Also check all packs for the previous
+        // Also check all packs for the previous: types first, then each lane's
+        // own Buffoon list (see brainstorm_blueprint.cl for the reasoning).
+        int buffoon[6];
+        int nb = 0;
         for (int p = 1; p <= 6; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
+            if (_pack.type == Buffoon_Pack) buffoon[nb++] = _pack.size;
+        }
+        for (int q = 0; q < nb; q++) {
             item jokers[5];
             item editions[5];
-
-            if (_pack.type == Buffoon_Pack) {
-                wr_buffoon_pack(jokers, editions, _pack.size, inst, ante);
-                for (int j = 0; j < _pack.size; j++) {
-                    if (jokers[j] == Diet_Cola) {
-                        dietColaCount++;
-                        continue;
-                    }
-                    if (editions[j] == Negative && (jokers[j] == Brainstorm || jokers[j] == Blueprint)) {
-                        negativeCopyJokerCount++;
-                    }
+            wr_buffoon_pack(jokers, editions, buffoon[q], inst, ante);
+            for (int j = 0; j < buffoon[q]; j++) {
+                if (jokers[j] == Diet_Cola) {
+                    dietColaCount++;
+                    continue;
+                }
+                if (editions[j] == Negative && (jokers[j] == Brainstorm || jokers[j] == Blueprint)) {
+                    negativeCopyJokerCount++;
                 }
             }
         }
