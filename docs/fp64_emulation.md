@@ -3,6 +3,8 @@
 **Verdict: exact emulation works, and it does not pay on the RTX 5080.** Every conversion below is
 bit-exact and verified. In real filters the gain is 0-2%, and sometimes a small loss. The prototype
 code is reproduced in the appendices so nobody has to rebuild it. None of it is in `lib/`.
+The appendix code and diff were written against `lib/` at commit `37140ce`; later `lib/` changes
+(e.g. the `new-wr-filter` merge) mean the call-site diff will not apply verbatim.
 
 ## Why not float-float (pairs of fp32)?
 
