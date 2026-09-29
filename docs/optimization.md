@@ -69,6 +69,7 @@ packs and vouchers were the last on the un-staged path.
 | `rng_advance_int` integer node recurrence | 7.2% ceiling, needs a lane-divergent fallback. Not worth it. |
 | GF(2) jump-ahead for the Tausworthe warmup | The warmup is **0.6%**. Also predicted a net loss: the table lookups cost more than the ops they remove, and NVIDIA `__constant` reads with lane-divergent addresses serialise. |
 | Software binary64 `randomseed` | **+7.8% cost** at realistic INT32 rates. |
+| Exact fp64 -> 32-bit emulation (node advance, `l_random`/`l_randint`, fp64-free `randomseed`) | **0-2% in real filters** (erratic, ANN), bit-exact. See [fp64_emulation.md](fp64_emulation.md). |
 | ILP / interleaving independent RNG streams | Chain probe flat at K=1..8 — not latency-bound. Also tried at K=2 historically: 1.045x slower. |
 | Hash-indexed RNG node cache | **0.14% of a seed.** The MRU hint, reverse scan and ante-local cache already cut key compares 1,693x. |
 | Seed bucketing by Overstock profile | Uniform frame sizes measure 0.970x for 4.7% fewer draws — the divergence is already gone. |
