@@ -980,9 +980,21 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     for (int o = 0; o < n; o++) a->ident[a->poolSlot[o]] = a->poolOut[o];
 
     // ---- score, in queue order ----
+    // At most one Diet Cola per shop frame: the first one is in the shop, so
+    // the game's pool excludes it for the rest of that frame's slots. It is
+    // sold on sight, so the next frame can draw it again.
+    int lastColaFrame = -1;
     for (int j = 0; j < jc; j++) {
         item id = (item)a->ident[j];
-        if (id == Diet_Cola) { c->colas++; c->seenCola = true; continue; }
+        if (id == Diet_Cola) {
+            int frame = a->cardIdx[j] / frameSize;
+            if (inst->params.showman || frame != lastColaFrame) {
+                c->colas++;
+                c->seenCola = true;
+                lastColaFrame = frame;
+            }
+            continue;
+        }
         int w = ann_target_window(a, j, wins, nwins);
         // A window target is made Negative by the tag, so it counts as one here.
         bool negative = (a->ed[j] & ANN_ED_NEGATIVE) || w >= 0;
