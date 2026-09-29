@@ -37,10 +37,24 @@ long filter(instance* inst) {
     long score = 0;
     for (int ante = 1; ante <= 2; ante++) {
         int packs = ante == 1 ? EAP_PACKS_ANTE1 : EAP_PACKS_ANTE2;
+        // All pack types first (one node, pack order), then this lane's own
+        // list of Arcana/Spectral packs. The soul polls and the Perkeo draw
+        // live on other nodes and are still made in pack order, so nothing
+        // changes but the warp cost: lanes no longer wait on every slot for
+        // whichever lane has a candidate there.
+        pack cand[EAP_PACKS_ANTE2 > EAP_PACKS_ANTE1 ? EAP_PACKS_ANTE2 : EAP_PACKS_ANTE1];
+        int nc = 0;
         for (int p = 0; p < packs; p++) {
             pack _pack = pack_info(next_pack(inst, ante));
-            if (_pack.type != Arcana_Pack && _pack.type != Spectral_Pack) continue;
-            if (!pack_has_soul(inst, _pack, ante)) continue;
+            if (_pack.type == Arcana_Pack || _pack.type == Spectral_Pack) cand[nc++] = _pack;
+        }
+        // Resolve both soul-poll nodes for every lane at once (creation only,
+        // no draw, so exact). On demand, each lane created them at its own
+        // first candidate slot and the warp paid the creation at every slot.
+        rng_node_resolve(inst, (__private ntype[]){N_Type, N_Type, N_Ante}, (__private int[]){R_Soul, R_Tarot, ante}, 3);
+        rng_node_resolve(inst, (__private ntype[]){N_Type, N_Type, N_Ante}, (__private int[]){R_Soul, R_Spectral, ante}, 3);
+        for (int q = 0; q < nc; q++) {
+            if (!pack_has_soul(inst, cand[q], ante)) continue;
             if (score < 1) score = 1;
             // Legendary jokers are not locked after being drawn in 1.0.1, so a
             // second Soul rolls independently; stop at the first Perkeo.

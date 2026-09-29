@@ -5,9 +5,25 @@
 //     long filter(instance* inst, long cutoff) { ... }
 // The value is the run's -c, unchanged; passing it costs nothing measurable.
 #ifdef FILTER_USES_CUTOFF
-#define RUN_FILTER(inst_ptr) filter(inst_ptr, filter_cutoff)
+#define RUN_FILTER_ARGS(inst_ptr) inst_ptr, filter_cutoff
 #else
-#define RUN_FILTER(inst_ptr) filter(inst_ptr)
+#define RUN_FILTER_ARGS(inst_ptr) inst_ptr
+#endif
+
+// A filter that needs its work-GROUP to cooperate -- to elect one lane to
+// print, or to reduce something across lanes -- defines FILTER_USES_GROUP_SCRATCH
+// and takes a `__local long*` as its LAST argument. Only search_ranks_grouped
+// passes a real pointer, to the same lsz-long scratch array the reduction below
+// uses; every other kernel passes null, because there is no group to cooperate
+// with. A filter that takes the pointer must therefore check it for null, and
+// must end with a barrier before returning, since this kernel writes the
+// lane's score into scratch[lid] the moment the filter comes back.
+#ifdef FILTER_USES_GROUP_SCRATCH
+#define RUN_FILTER(inst_ptr) filter(RUN_FILTER_ARGS(inst_ptr), (__local long*)0)
+#define RUN_FILTER_GROUPED(inst_ptr, scr) filter(RUN_FILTER_ARGS(inst_ptr), scr)
+#else
+#define RUN_FILTER(inst_ptr) filter(RUN_FILTER_ARGS(inst_ptr))
+#define RUN_FILTER_GROUPED(inst_ptr, scr) RUN_FILTER(inst_ptr)
 #endif
 
 // Temporary benchmark fixtures can define this to compile the previous range
@@ -60,6 +76,54 @@ __kernel void search(long start_rank, long num_seeds, long filter_cutoff) {
             s_print_score(&_seed, score);
         }
         RANGE_SEED_ADVANCE(_seed, stride);
+    }
+}
+
+// Rank-list search with one work-GROUP per seed instead of one work-item.
+//
+// The default mapping gives each seed to a single work-item, so a filter whose
+// own work is large is serial no matter how wide the device is, and the batch
+// waits for the slowest seed on one thread. That is the binding constraint for
+// tree-searching filters: a seed worth 59,049 leaf walks takes as long as one
+// thread needs, and a consumer GPU thread running fp64 at 1/64 rate is slower
+// at it than a CPU core.
+//
+// Here every lane of the group gets the same seed and the filter splits its own
+// work across the group, reading get_local_id/get_local_size itself and
+// returning that lane's best. The group maximum is reduced and printed once.
+// Selected with --group_per_seed, which also defines GROUP_PER_SEED so the
+// filter knows to split; a filter built without it would have every lane
+// duplicate the whole search, which is correct but pointless.
+//
+// The reduction is a serial scan by lane 0 rather than a tree: it runs once per
+// seed over at most a few hundred lanes, which is nothing beside the search,
+// and it is correct for any work-group size rather than powers of two only.
+//
+// It reduces the SCORE only. A filter that also wants to report HOW the best
+// score was reached cannot get that from here -- the winning lane's working
+// state is private to it and is gone by the time this runs. Such a filter takes
+// the scratch array itself (FILTER_USES_GROUP_SCRATCH above), elects its own
+// winner before returning, and prints from that lane while its state is still
+// live. Reducing the score again below is then redundant but harmless.
+__kernel void search_ranks_grouped(__global const long* ranks, long num_ranks,
+                                   long filter_cutoff, __local long* scratch) {
+    const uint lid = get_local_id(0);
+    const uint lsz = get_local_size(0);
+    // Every lane of a group shares group_id, so all of them make the same
+    // number of trips and every barrier below is reached by the whole group.
+    for (long g = (long)get_group_id(0); g < num_ranks; g += (long)get_num_groups(0)) {
+        seed _seed = s_from_rank(ranks[g]);
+        instance inst;
+        i_init(&inst, _seed);
+        long mine = RUN_FILTER_GROUPED(&inst, scratch);
+        barrier(CLK_LOCAL_MEM_FENCE);   // the filter may still be reading scratch
+        scratch[lid] = mine;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (lid == 0) {
+            for (uint i = 1; i < lsz; i++) if (scratch[i] > scratch[0]) scratch[0] = scratch[i];
+            if (scratch[0] >= filter_cutoff) s_print_score(&_seed, scratch[0]);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
 }
 

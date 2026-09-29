@@ -2,6 +2,8 @@
 
 In-depth explanations and usage guides are in the comments of each filter file.
 
+- **Analyze Naneinf Negatives:** Plans a naneinf shop line over antes 3-38: negative Blueprint/Brainstorm (+100), negative Baron/Mime/Burglar/DNA (+5), and optionally negative Juggler/Drunkard (+1, `-D ANN_SCORE_COMMONS`). Same shops, packs, vouchers and joker locks as Deep Negative Shops, plus the Diet Cola / Negative Tag trick: colas are sold on sight for Double Tags, negative Uncommons are kept and so leave the pool, and each Negative Tag turns `1 + colas` consecutive eligible shop jokers Negative. Every way of spending the tags is searched as a tree (first-slot copy window, first-slot Uncommon window, second-slot tag firing next ante, or bank), because a window's purchases lock Uncommons and really do change the later shops. Score is the flat weighted total of the best line. A seed offering more than `ANN_MAX_BRANCH_POINTS` (10) Negative Tags is not searched and returns `1000000000 + branch points`; `rank_naneinf.py` sorts the results and lists those separately. Meant for small `--from` pools -- a seed can cost up to 4^10 walks.
+	- For the strategy behind a score: `immolate -f analyze_naneinf_explain -s THESEED -n 1 -g 1 -c 0`
 - **Analyzer:** Prints a full analysis of a seed.
 	- To run this, the following syntax is recommended: `immolate -f analyzer -s THESEED -n 1 -g 1`
 	- It's also recommended to customize the filter itself to your needs. (deck, stake, maximum ante to search, number of cards per ante)
@@ -16,6 +18,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **Double Legendary:** Searches for a seed with two legendary jokers in Ante 1. Every Arcana or Spectral Pack in the shop must be opened.
 - **Early Ante Perkeo:** Seed-supplier filter: The Soul (score 1) or Perkeo from The Soul (score 2) in any Arcana/Spectral pack of the first two antes (4 pack slots in ante 1, 6 in ante 2).
 	- Run once with `--to` to build a pool (`-c 1` keeps ~4% of seeds, `-c 2` ~0.8%), then search that pool with `--from` instead of walking every seed. See the comments in the filter and the Seed-Supplier Files section of the documentation.
+- **Early Negative Rares:** Negative Rare jokers in the shops of antes 3-10, scored `sum of (20 - ante)` so an ante-3 find is worth 17 and an ante-10 find 10. Same frame counts, frame sizes and voucher handling as Deep Negative Shops, so card totals match. Draws no joker identities at all (it asks "is this Rare", never "which Rare") and locks nothing, so no stream ever resamples; the only locks are the voucher upgrades, needed to reproduce the deep filters' frame sizes. Edition is tested before rarity: both nodes advance for every joker, but only 0.3% are Negative, so the rarity value is computed only for those. `-D ENR_COUNT_ONLY` returns the unweighted count, `-D ENR_FIRST_ANTE` / `-D ENR_LAST_ANTE` / `-D ENR_WEIGHT_BASE` move the range and the weighting.
 - **Emperor Fool:** Searches for Emperor-Fool Chains.
 	- Score output is the length of the chain, with the last digit being the ante that The Emperor must be used in to start the chain.
 - **Erratic Flush Five:** Searches for an Erratic Deck seed with lots of an exact card.
@@ -29,6 +32,7 @@ In-depth explanations and usage guides are in the comments of each filter file.
 - **High Score Demo:** Searches for a seed with a good setup for high score world record runs.
 	- Because this filter was written during Balatro's demo, its search criteria is far from optimal for the current world record strategy.
 - **Immolate Sixth Sense:** Sixth Sense or Seance obtainable from a shop or Buffoon Pack in antes 1-3, and Immolate among the spectral cards it creates from that ante on (first two per ante for Sixth Sense, first four for Seance). Score is the number of Immolates over both jokers. Checks the creations first (two draws per ante) and only then scans shops, drawing a joker's identity only when its rarity poll says Uncommon. Carries the same fresh-profile joker lock lists as Deep Negative Shops, so locked uncommons reroll as in the game.
+- **Juggle Tag:** 1 if the first tag of ante 39 (`-D JT_ANTE` to change it) is the Juggle Tag, else 0. A tag comes off its own ante-keyed RNG node, so the ante is drawn on its own without walking any earlier one -- the earlier antes only contribute lock state, which is settled with no draws at all. Carries the same tag locks as Negative Tags and the deep shop filters, which matters: a locked tag is rerolled, so a different lock set draws a different tag here. `-D JT_RAW` returns the tag itself instead of the boolean, for checking the lock set.
 - **Legendary Skip:** Searches for a seed where a Legendary Joker is obtainable through a tag in Ante 1.
 - **Longest Joker Name:** Searches for seeds with a Polychrome Perishable Rental Delayed Gratification in the first shop.
 	- Requires Gold Stake.
