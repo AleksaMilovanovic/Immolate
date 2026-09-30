@@ -10,6 +10,30 @@
 //   negative Juggler / Drunkard            +1   (only with ANN_SCORE_COMMONS)
 //   every other negative                    0   (Uncommons still shrink the pool)
 //
+// ETERNAL ONLY (-D ANN_ETERNAL_ONLY, or -f analyze_naneinf_eternal). Only
+// Blueprint, Brainstorm, Baron and Mime score, and only when they are BOTH
+// Negative and Eternal; a Negative joker without the sticker scores nothing.
+// Weights are unchanged (copy +100, Baron/Mime +5), so the score reads as
+// eternal negative copy jokers x100 plus eternal negative Baron/Mime x5. The
+// cola engine is untouched -- negative Uncommons are still kept to shrink the
+// pool whatever their stickers -- but farming follows the sticker rather than
+// the edition: an Eternal copy joker cannot be sold, so a non-Negative one is
+// never bought and farms nothing, and a Negative one without the sticker is
+// worth nothing to the score, so it is sold for its Double Tag like any other.
+// Only a Negative Eternal copy joker is kept and stops farming for its kind.
+// First-slot copy windows are aimed at Eternal copy jokers.
+//
+// Negative Uncommons are only bought WITHOUT the sticker, so they can be sold
+// later; an Eternal one is passed over and stays in the pool. Mime is the
+// exception, being a target. Diet Cola needs no such rule: the game never
+// makes it Eternal.
+//
+// Assumes Black Stake or higher: below it the game never applies the Eternal
+// sticker and every seed scores 0. The sticker comes from one poll per joker,
+// in queue order, off "etperpoll"+ante in the shop and "packetper"+ante in
+// Buffoon packs, above 0.7 -- the same draw lib/functions.cl makes. All four
+// targets are eternal-compatible.
+//
 // SHOP MODEL. Identical to filters/deep_negative_shops.cl: same frame counts,
 // same frame sizes, same voucher handling, same joker lock lists. See that
 // file's header for the reasoning; only the differences are documented here.
@@ -23,8 +47,15 @@
 // Cola's share of it. That is the whole engine: negative Uncommons buy colas,
 // colas buy wider Negative Tags, wider tags buy more negative Uncommons.
 //
-// Rares are never locked. Duplicate copy jokers are what Showman is bought for,
-// and the model simply allows them (see ANN_SHOWMAN_SUPPRESSES_RESAMPLE).
+// COPY JOKERS ARE OWNED. Outside a Negative Tag window Blueprint and Brainstorm
+// are locked -- one of each is already held, and without Showman the shop and
+// the Buffoon packs resample past them. Inside a window Showman is held, from
+// the window's first card to its last, so there they are unlocked and can show
+// up again. That is per shop card, which ann_flush_pool handles with an `open`
+// mask over the Rare ordinals. A first-slot window is chosen off a scouting
+// draw of the Rares with Showman held for the whole ante -- where copy jokers
+// WOULD show up -- and, as with everything else, only the committed walk is
+// scored. The other Rares are never locked.
 //
 // TAG SPENDING. Per ante the options are, and never more than one of:
 //   T1_COPY  first-slot Negative Tag, window = the first half of the ante's
@@ -192,20 +223,21 @@ inline long ann_group_max(__local long* scratch, int lane, int lanes, long mine)
 // identity node and its resample chain are read by nothing else and are
 // discarded at the ante boundary).
 // #define ANN_SCORE_COMMONS
+#if defined(ANN_ETERNAL_ONLY) && defined(ANN_SCORE_COMMONS)
+#error "ANN_ETERNAL_ONLY scores no Commons; drop ANN_SCORE_COMMONS"
+#endif
 
 // SHOWMAN. Bought before a copy-joker window and sold on the frame boundary
 // after the last copy joker, so the window can take duplicates of copy jokers
-// already owned. It is modelled as NARRATIVE ONLY: the explain output says
-// which frames to buy and sell on, and the draw stream is untouched.
+// already owned. It is modelled ONLY as that: Blueprint and Brainstorm are
+// unlocked over the window's span (see COPY JOKERS ARE OWNED above), and the
+// explain output says which frames to buy and sell on.
 //
-// That is not a shortcut, it is the only coherent option here. params.showman
-// suppresses ALL resampling, including the Uncommon resampling the cola engine
-// runs on, so switching it on inside a window would stop the pool shrinking
-// exactly where the model wants it to. It also makes a window's contents depend
-// on where the window starts, which is circular -- the start is chosen by
-// reading those contents. And the duplication it exists to buy is already
-// allowed, because Rares are never locked. So the purchase changes nothing that
-// this model tracks, and the only honest thing to report is when to make it.
+// params.showman is not used for it. It suppresses ALL resampling, including
+// the Uncommon resampling the cola engine runs on, so switching it on inside a
+// window would stop the pool shrinking exactly where the model wants it to. It
+// would also make a window's Uncommons depend on where the window starts, which
+// is circular -- the start is chosen by reading them.
 
 // Worst case is ante 38: 231 frames x 4 cards = 924, every one a Joker.
 #define ANN_MAX_CARDS 924
@@ -224,7 +256,9 @@ __constant item ANN_LOCKED_RARES[] = {
 };
 __constant item ANN_UNLOCKED_COMMONS[] = {};
 __constant item ANN_UNLOCKED_UNCOMMONS[] = {Showman};
-__constant item ANN_UNLOCKED_RARES[] = {Blueprint, Brainstorm};
+// Blueprint and Brainstorm stay locked: they are owned, and a Negative Tag
+// window's Showman unlocks them card by card.
+__constant item ANN_UNLOCKED_RARES[] = {};
 // Same list and handling as filters/negative_tags.cl and deep_negative_shops.cl.
 __constant item ANN_LOCKED_TAGS[] = { Foil_Tag, Holographic_Tag, Polychrome_Tag };
 
@@ -282,6 +316,16 @@ typedef struct AnnCtx {
 #endif
     int colas;
     int copies, fives, ones;
+#ifdef ANN_EXPLAIN
+    // Where every Double Tag came from, over the whole line, for the printout:
+    // Diet Colas from packs and from the shop, then farming -- a copy joker
+    // sold that was not Negative, and one that was Negative but is sold anyway
+    // (ANN_ETERNAL_ONLY, no sticker). skipEternal counts copy jokers passed
+    // over because the sticker means they could never be sold. noTemplate and
+    // noFarm count sellable copy jokers that farmed nothing: before the first
+    // Diet Cola, and after a kept Negative one of that kind shut farming off.
+    int srcPack, srcShop, srcFarm, srcFarmNeg, skipEternal, noTemplate, noFarm;
+#endif
     bool seenCola;       // a Diet Cola has been met, so a template exists to copy
     bool negBlueprint;   // a Negative one of this kind is owned, so it is kept
     bool negBrainstorm;  //   rather than sold -- farming stops for that kind
@@ -425,14 +469,25 @@ inline double ann_take_node(instance* inst, ntype nts[], int ids[], int num) {
 // ---------------------------------------------------------------------------
 #define ANN_SKEL_JWORDS(cards) (((cards) + 63) / 64)
 #define ANN_SKEL_RWORDS(cards) ((2 * (cards) + 63) / 64)
+// ANN_ETERNAL_ONLY adds one bit per Joker for the Eternal sticker, after the
+// edition words. The sticker poll is ante-keyed and never looks at the lock
+// set either, so it is as branch-invariant as the rest of the skeleton.
+#ifdef ANN_ETERNAL_ONLY
+#define ANN_SKEL_ULONGS(cards) (2 * ANN_SKEL_JWORDS(cards) + 2 * ANN_SKEL_RWORDS(cards))
+#else
 #define ANN_SKEL_ULONGS(cards) (ANN_SKEL_JWORDS(cards) + 2 * ANN_SKEL_RWORDS(cards))
+#endif
 
 // Big enough for antes 3-38 reserved at the worst-case frame size (12.8 KB).
 // Antes that do not fit are simply not cached -- they redraw, exactly as
 // before -- so raising ANN_LAST_ANTE without raising this costs speed, never
-// correctness.
+// correctness. The Eternal bits take antes 3-38 to 2028 words.
 #ifndef ANN_SKEL_WORDS
+#ifdef ANN_ETERNAL_ONLY
+#define ANN_SKEL_WORDS 2048
+#else
 #define ANN_SKEL_WORDS 1664
+#endif
 #endif
 
 typedef struct AnnSkel {
@@ -481,9 +536,19 @@ inline void ann_keeps_on(instance* inst, const ann_keep* keeps, int n) {
 // is locked as the sweep passes its ordinal, so a keep discovered at ordinal k
 // affects ordinals after k and leaves everything before k alone -- which is what
 // makes lock-as-soon-as-seen exact rather than approximate.
+//
+// `open`, when given, marks the ordinals drawn with Showman held: Blueprint and
+// Brainstorm are unlocked there and locked everywhere else, and left locked
+// afterwards (Rare pool only).
+inline void ann_copy_state(instance* inst, const ann_mask* open, int o) {
+    if (open == 0) return;
+    if (annm_get(open, o)) { i_unlock(inst, Blueprint); i_unlock(inst, Brainstorm); }
+    else                   { i_lock(inst, Blueprint);   i_lock(inst, Brainstorm); }
+}
+
 void ann_flush_pool(instance* inst, ann_ctx* c, rtype rngType, rsrc src, int ante,
                     __constant item items[], int n, short* out,
-                    const ann_keep* keeps, int keepCount) {
+                    const ann_keep* keeps, int keepCount, const ann_mask* open) {
     if (n <= 0) return;
     int itemCount = (int)items[0];
     lrandom rng = inst->rng;
@@ -503,8 +568,10 @@ void ann_flush_pool(instance* inst, ann_ctx* c, rtype rngType, rsrc src, int ant
 #ifdef ANN_PROFILE
         c->draws++;
 #endif
+        ann_copy_state(inst, open, o);
         if (!inst->params.showman && i_locked(inst, it)) annm_set(&pending, o);
     }
+    if (open != 0) { i_lock(inst, Blueprint); i_lock(inst, Brainstorm); }
 
     // Nothing unlocked means no resample can ever terminate. Checked with every
     // keep applied, which is the most-locked the sweep below ever gets, so one
@@ -543,11 +610,13 @@ void ann_flush_pool(instance* inst, ann_ctx* c, rtype rngType, rsrc src, int ant
 #ifdef ANN_PROFILE
                 c->draws++;
 #endif
+                ann_copy_state(inst, open, o);
                 if (i_locked(inst, it)) annm_set(&next, o);
             }
         }
         pending = next;
     }
+    if (open != 0) { i_lock(inst, Blueprint); i_lock(inst, Brainstorm); }
     ann_keeps_on(inst, keeps, keepCount);
     inst->rng = rng;
 }
@@ -558,6 +627,19 @@ void ann_flush_pool(instance* inst, ann_ctx* c, rtype rngType, rsrc src, int ant
 
 #define ANN_ED_NEGATIVE 1
 #define ANN_ED_ANY      2
+// Not an edition: the Eternal sticker, carried in the same per-joker byte. Only
+// ever set under ANN_ETERNAL_ONLY, and packed into the skeleton separately.
+#define ANN_ED_ETERNAL  4
+
+// Whether a Negative joker with these stickers can count towards the score.
+inline bool ann_counts(bool eternal) {
+#ifdef ANN_ETERNAL_ONLY
+    return eternal;
+#else
+    (void)eternal;
+    return true;
+#endif
+}
 
 #define ANN_NONE    0
 #define ANN_T1_COPY 1
@@ -622,6 +704,7 @@ typedef struct AnnAnte {
     short eligSlot[ANN_MAX_CARDS];  // per eligible ordinal: the joker slot
     short poolSlot[ANN_MAX_CARDS];  // scratch: pool ordinal -> joker slot
     short poolOut[ANN_MAX_CARDS];   // scratch: pool ordinal -> drawn item
+    short pick[ANN_MAX_CARDS];      // per Rare slot: its identity with Showman held
     int eligCount;
 } ann_ante;
 
@@ -667,11 +750,30 @@ inline bool ann_never_buy(item joker, int ante) {
     return false;
 }
 
+// Whether a Negative Uncommon is bought and kept, shrinking the pool. Under
+// ANN_ETERNAL_ONLY an Eternal one is passed over -- it could never be sold
+// again -- except Mime, which is a target and is bought only WITH the sticker
+// in mind. (Diet Cola never reaches here, and cannot be Eternal anyway: the
+// game gives it no sticker, see the eternal_compat list in lib/functions.cl.)
+inline bool ann_buys_uncommon(item joker, int ante, bool eternal) {
+    if (ann_never_buy(joker, ante)) return false;
+#ifdef ANN_ETERNAL_ONLY
+    if (eternal) return joker == Mime;
+#else
+    (void)eternal;
+#endif
+    return true;
+}
+
 // Points a single joker is worth once it is Negative.
 inline int ann_value(item joker, bool* isCopy) {
     *isCopy = (joker == Blueprint || joker == Brainstorm);
     if (*isCopy) return ANN_W_COPY;
+#ifdef ANN_ETERNAL_ONLY
+    if (joker == Baron || joker == Mime) return ANN_W_FIVE;
+#else
     if (joker == Baron || joker == DNA || joker == Mime) return ANN_W_FIVE;
+#endif
 #ifdef ANN_SCORE_COMMONS
     if (joker == Juggler || joker == Drunkard) return ANN_W_ONE;
 #endif
@@ -689,13 +791,41 @@ inline int ann_value(item joker, bool* isCopy) {
 // It stops per kind once a Negative one of that kind turns up: that one is kept
 // rather than sold. So a negative Blueprint leaves Brainstorm still farming, and
 // only both together shut it off.
-inline void ann_saw_copy(ann_ctx* c, item joker, bool negative) {
+//
+// Under ANN_ETERNAL_ONLY the sticker decides instead: an Eternal copy joker
+// cannot be sold, so a non-Negative one is never bought and farms nothing, and
+// only a Negative Eternal one is kept. A Negative one without the sticker
+// scores nothing, so it is sold like the rest.
+inline void ann_saw_copy(ann_ctx* c, item joker, bool negative, bool eternal) {
     bool bp = (joker == Blueprint);
+#ifdef ANN_ETERNAL_ONLY
+    if (eternal && !negative) {
+#ifdef ANN_EXPLAIN
+        c->skipEternal++;
+#endif
+        return;
+    }
+    bool soldNegative = negative && !eternal;
+    negative = negative && eternal;
+#else
+    (void)eternal;
+    bool soldNegative = false;
+#endif
+    (void)soldNegative;
     if (negative) {
         if (bp) c->negBlueprint = true; else c->negBrainstorm = true;
         return;
     }
-    if (c->seenCola && !(bp ? c->negBlueprint : c->negBrainstorm)) c->colas++;
+    if (c->seenCola && !(bp ? c->negBlueprint : c->negBrainstorm)) {
+        c->colas++;
+#ifdef ANN_EXPLAIN
+        if (soldNegative) c->srcFarmNeg++; else c->srcFarm++;
+#endif
+    }
+#ifdef ANN_EXPLAIN
+    else if (!c->seenCola) c->noTemplate++;
+    else c->noFarm++;
+#endif
 }
 
 // Colas are worth ~90% of the count when actually cashed in: one is held as the
@@ -739,7 +869,7 @@ inline void ann_credit(ann_ctx* c, int value, bool isCopy) {
 void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
                    shop sh, double totalRate,
                    const ann_win* wins, int nwins,
-                   int* colasAfterPacks, bool spendColas,
+                   int* colasAfterPacks, bool spendColas, bool scout,
                    ann_skel* sk, ann_log* log) {
     // Every reachable node is ante-keyed, so last ante's slots are unreachable.
     inst->rngCache.nextFreeNode = 0;
@@ -776,18 +906,35 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         // permanent lock taken here is not undone by the loop above.
         for (int j = 0; j < _pack.size; j++) {
             bool negative = next_joker_edition(inst, S_Buffoon, ante) == Negative;
-            if (drawn[j] == Diet_Cola) { c->colas++; c->seenCola = true; continue; }
+#ifdef ANN_ETERNAL_ONLY
+            // One sticker poll per pack joker, drawn for every card whatever
+            // it turns out to be, as create_card does.
+            bool eternal = random(inst, (__private ntype[]){N_Type, N_Ante},
+                                  (__private int[]){R_Eternal_Perishable_Pack, ante}, 2) > 0.7;
+#else
+            bool eternal = false;
+#endif
+            if (drawn[j] == Diet_Cola) {
+                c->colas++;
+                c->seenCola = true;
+#ifdef ANN_EXPLAIN
+                c->srcPack++;
+#endif
+                continue;
+            }
             if (drawn[j] == Blueprint || drawn[j] == Brainstorm)
-                ann_saw_copy(c, drawn[j], negative);
+                ann_saw_copy(c, drawn[j], negative, eternal);
             if (!negative) continue;
             bool isCopy;
-            ann_credit(c, ann_value(drawn[j], &isCopy), isCopy);
+            // Scores only with the sticker under ANN_ETERNAL_ONLY. The keep
+            // below is separate: see ann_buys_uncommon.
+            if (ann_counts(eternal)) ann_credit(c, ann_value(drawn[j], &isCopy), isCopy);
             // Kept, so it leaves the Uncommon pool. Pack jokers are never
             // Negative Tag targets -- the tag only reads the shop queue.
             // ANN_POOL_EMPTY is Common, so it never enters the Uncommon pool
             // accounting even when an Uncommon slot fell back to it.
             if (rr[j] == Rarity_Uncommon && drawn[j] != ANN_POOL_EMPTY
-                && !ann_never_buy(drawn[j], ante))
+                && ann_buys_uncommon(drawn[j], ante, eternal))
                 ann_keep_uncommon(inst, c, drawn[j]);
         }
     }
@@ -836,9 +983,12 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             int rb = 2 * j;   // always even, so a 2-bit field never straddles a word
             a->rar[j] = (uchar)((sk->w[base + jw + (rb >> 6)] >> (rb & 63)) & 3UL);
             a->ed[j]  = (uchar)((sk->w[base + jw + rw + (rb >> 6)] >> (rb & 63)) & 3UL);
+#ifdef ANN_ETERNAL_ONLY
+            if ((sk->w[base + jw + 2 * rw + (j >> 6)] >> (j & 63)) & 1UL) a->ed[j] |= ANN_ED_ETERNAL;
+#endif
         }
     } else {
-        if (base >= 0) for (int k = 0; k < jw + 2 * rw; k++) sk->w[base + k] = 0UL;
+        if (base >= 0) for (int k = 0; k < ANN_SKEL_ULONGS(cards); k++) sk->w[base + k] = 0UL;
 
         rng_node_id ctNode = rng_node_resolve(inst,
             (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Card_Type, ante}, 2);
@@ -879,6 +1029,20 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         inst->rngCache.nodes[rarNode].rngState = rarState;
         inst->rngCache.nodes[edNode].rngState = edState;
 
+#ifdef ANN_ETERNAL_ONLY
+        // One sticker poll per shop joker in queue order, whatever its
+        // identity. Above 0.7 is Eternal; every scored target is compatible.
+        rng_node_id etNode = rng_node_resolve(inst,
+            (__private ntype[]){N_Type, N_Ante}, (__private int[]){R_Eternal_Perishable, ante}, 2);
+        double etState = inst->rngCache.nodes[etNode].rngState;
+        for (int j = 0; j < jc; j++) {
+            if (ann_random(inst, &etState, &scratch) <= 0.7) continue;
+            a->ed[j] |= ANN_ED_ETERNAL;
+            if (base >= 0) sk->w[base + jw + 2 * rw + (j >> 6)] |= 1UL << (j & 63);
+        }
+        inst->rngCache.nodes[etNode].rngState = etState;
+#endif
+
         if (base >= 0) { sk->jc[ante] = (short)jc; sk->filled[ante] = 1; }
     }
 
@@ -907,9 +1071,35 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
 
     n = 0;
     for (int j = 0; j < jc; j++) if (a->rar[j] == ANN_R_RARE) a->poolSlot[n++] = (short)j;
-    ann_flush_pool(inst, c, R_Joker_Rare, S_Shop, ante, RARE_JOKERS, n, a->poolOut,
-                   (const ann_keep*)0, 0);
-    for (int o = 0; o < n; o++) a->ident[a->poolSlot[o]] = a->poolOut[o];
+    {
+        // Showman is held from each window's first card to its last, so the
+        // copy jokers are open on exactly the Rare ordinals in those spans.
+        ann_mask open;
+        annm_clear(&open);
+        for (int w = 0; w < nwins; w++) {
+            int s = wins[w].start;
+            int e = wins[w].start + wins[w].width;
+            if (e > eligCount) e = eligCount;
+            if (s >= e) continue;
+            int lo = a->cardIdx[a->eligSlot[s]];
+            int hi = a->cardIdx[a->eligSlot[e - 1]];
+            for (int o = 0; o < n; o++) {
+                int card = a->cardIdx[a->poolSlot[o]];
+                if (card >= lo && card <= hi) annm_set(&open, o);
+            }
+        }
+        ann_flush_pool(inst, c, R_Joker_Rare, S_Shop, ante, RARE_JOKERS, n, a->poolOut,
+                       (const ann_keep*)0, 0, &open);
+        for (int o = 0; o < n; o++) a->ident[a->poolSlot[o]] = a->poolOut[o];
+        if (scout) {
+            // Where a copy joker WOULD show up with Showman held all ante, for
+            // choosing a first-slot window. Same nodes, redrawn from the start.
+            for (int o = 0; o < n; o++) annm_set(&open, o);
+            ann_flush_pool(inst, c, R_Joker_Rare, S_Shop, ante, RARE_JOKERS, n, a->poolOut,
+                           (const ann_keep*)0, 0, &open);
+            for (int o = 0; o < n; o++) a->pick[a->poolSlot[o]] = a->poolOut[o];
+        }
+    }
 
 #ifdef ANN_SCORE_COMMONS
     // The Common identity node and its resample chain are read by nothing else
@@ -923,7 +1113,7 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         if ((a->ed[j] & ANN_ED_NEGATIVE) || ann_is_target(a, j, wins, nwins)) lastCommon = n;
     }
     ann_flush_pool(inst, c, R_Joker_Common, S_Shop, ante, COMMON_JOKERS, lastCommon, a->poolOut,
-                   (const ann_keep*)0, 0);
+                   (const ann_keep*)0, 0, (const ann_mask*)0);
     for (int o = 0; o < lastCommon; o++) a->ident[a->poolSlot[o]] = a->poolOut[o];
 #endif
 
@@ -940,7 +1130,7 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     int finalized = 0;
     while (true) {
         ann_flush_pool(inst, c, R_Joker_Uncommon, S_Shop, ante, UNCOMMON_JOKERS, n, a->poolOut,
-                       keeps, keepCount);
+                       keeps, keepCount, (const ann_mask*)0);
 #ifdef ANN_PROFILE
         c->passes++;
 #endif
@@ -961,8 +1151,9 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             if (perturbed) break;   // trust horizon
             if (id == Diet_Cola) continue;         // always sold, so never kept
             if (id == ANN_POOL_EMPTY) continue;    // exhausted-pool fallback, a Common
-            if (ann_never_buy(id, ante)) continue; // never bought, so never kept
             int slot = a->poolSlot[o];
+            // never bought, so never kept
+            if (!ann_buys_uncommon(id, ante, (a->ed[slot] & ANN_ED_ETERNAL) != 0)) continue;
             if (!((a->ed[slot] & ANN_ED_NEGATIVE) || ann_is_target(a, slot, wins, nwins))) continue;
             if (c->uncAvail <= ANN_LOCK_FLOOR || keepCount >= ANN_MAX_KEEPS) { o = n; break; }
             keeps[keepCount].ord = (short)o;
@@ -991,6 +1182,9 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             if (inst->params.showman || frame != lastColaFrame) {
                 c->colas++;
                 c->seenCola = true;
+#ifdef ANN_EXPLAIN
+                c->srcShop++;
+#endif
                 lastColaFrame = frame;
             }
             continue;
@@ -998,8 +1192,9 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         int w = ann_target_window(a, j, wins, nwins);
         // A window target is made Negative by the tag, so it counts as one here.
         bool negative = (a->ed[j] & ANN_ED_NEGATIVE) || w >= 0;
-        if (id == Blueprint || id == Brainstorm) ann_saw_copy(c, id, negative);
-        if (!negative) continue;
+        bool eternal = (a->ed[j] & ANN_ED_ETERNAL) != 0;
+        if (id == Blueprint || id == Brainstorm) ann_saw_copy(c, id, negative, eternal);
+        if (!negative || !ann_counts(eternal)) continue;
 
         bool isCopy;
         int value = ann_value(id, &isCopy);
@@ -1036,10 +1231,13 @@ int ann_pick_window(const ann_ante* a, int ante, int width, int limitCards, int 
         for (int k = 0; k < width; k++) {
             int slot = a->eligSlot[ws + k];
             item id = (item)a->ident[slot];
-            if (id == Blueprint || id == Brainstorm) copies++;
+            if (a->rar[slot] == ANN_R_RARE) id = (item)a->pick[slot];
+            if ((id == Blueprint || id == Brainstorm) && ann_counts((a->ed[slot] & ANN_ED_ETERNAL) != 0))
+                copies++;
             // Only Uncommons that would actually be bought: the rest leave the
             // pool untouched, which is the entire point of this branch.
-            if (a->rar[slot] == ANN_R_UNCOMMON && !ann_never_buy(id, ante)) unc++;
+            if (a->rar[slot] == ANN_R_UNCOMMON
+                && ann_buys_uncommon(id, ante, (a->ed[slot] & ANN_ED_ETERNAL) != 0)) unc++;
         }
         bool better = byCopy ? (copies > bc || (copies == bc && unc > bu))
                              : (unc > bu || (unc == bu && copies > bc));
@@ -1138,7 +1336,8 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
 
     // For NONE and T2 this is the whole line. For a first-slot tag it also
     // scouts the queue the window will be chosen from.
-    ann_ante_walk(inst, c, a, ante, sh, totalRate, wins, nw, &colasAfterPacks, false, sk, log);
+    ann_ante_walk(inst, c, a, ante, sh, totalRate, wins, nw, &colasAfterPacks, false,
+                  choice == ANN_T1_COPY || choice == ANN_T1_UNC, sk, log);
     log->colas = colasAfterPacks;
     log->frameSize = a->frameSize;
 
@@ -1202,7 +1401,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             pendLog->nitems = pendItems0;
             pendLog->lastCopyCard = pendCopy0;
         }
-        ann_ante_walk(inst, c, a, ante, sh, totalRate, wins, nw, &colasAfterPacks, true, sk, log);
+        ann_ante_walk(inst, c, a, ante, sh, totalRate, wins, nw, &colasAfterPacks, true, false, sk, log);
         log->colas = colasAfterPacks;
         log->width = width;
         log->startCard = a->cardIdx[a->eligSlot[ws]];
@@ -1491,6 +1690,10 @@ long ann_search(instance* inst, shop sh, double totalRate, int uncAvail0,
     ann_ctx ctx;
 
     ctx.colas = 0; ctx.copies = 0; ctx.fives = 0; ctx.ones = 0;
+#ifdef ANN_EXPLAIN
+    ctx.srcPack = 0; ctx.srcShop = 0; ctx.srcFarm = 0; ctx.srcFarmNeg = 0; ctx.skipEternal = 0;
+    ctx.noTemplate = 0; ctx.noFarm = 0;
+#endif
     ctx.seenCola = false; ctx.negBlueprint = false; ctx.negBrainstorm = false;
     ctx.pendingWidth = 0; ctx.pendingLog = 0;
     ctx.overstock = false; ctx.overstockPlus = false;
@@ -1613,14 +1816,27 @@ void ann_explain(long best, const int* bpAnte, int M,
     // else was already Negative when it was found.
     int tagged = 0;
     for (int d = 0; d < M; d++) tagged += bestLog[d].points;
+#ifdef ANN_ETERNAL_ONLY
+    printf("score %d  =  %d eternal copy x%d + %d eternal Baron/Mime x%d",
+           (int)best, bc->copies, ANN_W_COPY, bc->fives, ANN_W_FIVE);
+#else
     printf("score %d  =  %d copy x%d + %d Baron/Mime/DNA x%d",
            (int)best, bc->copies, ANN_W_COPY, bc->fives, ANN_W_FIVE);
+#endif
 #ifdef ANN_SCORE_COMMONS
     printf(" + %d Juggler/Drunkard x%d", bc->ones, ANN_W_ONE);
 #endif
     printf("\n         of which  +%d from negative tags, +%d found already Negative\n",
            tagged, (int)best - tagged);
     printf("         %d Diet Cola(s) left unspent at the end\n", bc->colas);
+    printf("         Double Tags over the run: %d Diet Cola from packs + %d from the shop"
+           " + %d farmed off non-Negative copy jokers", bc->srcPack, bc->srcShop, bc->srcFarm);
+#ifdef ANN_ETERNAL_ONLY
+    printf(" + %d farmed off Negative non-Eternal copy jokers\n", bc->srcFarmNeg);
+    printf("         %d Eternal non-Negative copy joker(s) passed over (cannot be sold)", bc->skipEternal);
+#endif
+    printf("\n         sellable copy jokers that farmed nothing: %d before the first Diet Cola,"
+           " %d after a Negative one of that kind was kept\n", bc->noTemplate, bc->noFarm);
     printf("%d branch point(s):\n", M);
     for (int d = 0; d < M; d++) {
         const ann_log* g = &bestLog[d];
@@ -1809,6 +2025,56 @@ long filter(instance* inst) {
         printf("skeleton identical in %d of %d antes; joker identities differing: %d\n",
                matched, ANN_LAST_ANTE - ANN_FIRST_ANTE + 1, identDiff);
         return matched;
+    }
+#endif
+
+#if defined(ANN_ETERNAL_CHECK) && defined(ANN_ETERNAL_ONLY)
+    // The Eternal bits against lib's own shop draw, shop_items_dense with
+    // SHOP_STICKERS at Black Stake (Eternal on, Perishable and Rental off, so
+    // its flag is exactly the poll). Identities are not drawn there, so every
+    // slot reads as compatible and the poll is compared bare.
+    //
+    //   immolate -f analyze_naneinf_eternal -s SEED -n 1 -g 1 -c 0 \
+    //            --build_opts "-D ANN_ETERNAL_CHECK"
+    //
+    // Returns 0 when every joker in antes ANN_FIRST_ANTE..ANN_LAST_ANTE agrees on
+    // card type and sticker, otherwise the number that did not.
+    {
+        ann_ante a1;
+        ann_ctx c1;
+        ann_log d1;
+        c1.colas = 0; c1.copies = 0; c1.fives = 0; c1.ones = 0;
+        c1.seenCola = false; c1.negBlueprint = false; c1.negBrainstorm = false;
+        c1.pendingWidth = 0; c1.pendingLog = 0; c1.uncAvail = uncAvail0;
+        c1.overstock = false; c1.overstockPlus = false;
+        set_stake(inst, Black_Stake);
+        shopitem out[SHOP_MAX_ITEMS];
+        int bad = 0, jokers = 0, eternals = 0;
+        for (int ante = 1; ante <= ANN_LAST_ANTE; ante++) {
+            ann_ante_step(inst, &c1, &a1, ante, sh, totalRate, ANN_NONE, (ann_skel*)0, &d1);
+            if (ante < ANN_FIRST_ANTE) continue;
+            int cards = ann_frames(ante) * a1.frameSize;
+            inst->rngCache.nextFreeNode = 0;
+            inst->rngCache.lastNode = -1;
+            int j = 0;
+            for (int base = 0; base < cards; base += SHOP_MAX_ITEMS) {
+                int m = cards - base < SHOP_MAX_ITEMS ? cards - base : SHOP_MAX_ITEMS;
+                shop_items_dense_window(inst, ante, m, out, SHOP_STICKERS);
+                for (int i = 0; i < m; i++) {
+                    if (out[i].type != ItemType_Joker) continue;
+                    bool annEt = j < a1.jokerCards && a1.cardIdx[j] == base + i
+                              && (a1.ed[j] & ANN_ED_ETERNAL) != 0;
+                    if (j >= a1.jokerCards || a1.cardIdx[j] != base + i
+                        || annEt != out[i].joker.stickers.eternal) bad++;
+                    if (annEt) eternals++;
+                    jokers++;
+                    j++;
+                }
+            }
+            if (j != a1.jokerCards) bad++;
+        }
+        printf("eternal check: %d jokers, %d eternal, %d mismatched\n", jokers, eternals, bad);
+        return bad;
     }
 #endif
 
