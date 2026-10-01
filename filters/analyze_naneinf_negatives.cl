@@ -77,6 +77,14 @@
 // they are taken in order and the T1 search starts after the T2 window, since
 // everything before it is already Negative.
 //
+// FRAMES. A tag is only ever applied from the start of a shop frame, and never
+// on the ante's first frame (frame 0): it takes the first eligible jokers at or
+// after card f * frameSize for some f >= ANN_FIRST_TAG_FRAME. So with frame size
+// 2 and "Seance, Burglar | Credit Card, Blueprint | Blackboard, Brainstorm", one
+// tag and no colas reaches Credit Card or Blackboard and neither copy joker. A
+// T2 window fires from frame ANN_FIRST_TAG_FRAME of the next ante; a T1 window
+// in the same ante starts on the first frame boundary past it.
+//
 // An eligible target is a shop joker with no edition at all -- Foil,
 // Holographic, Polychrome and already-Negative jokers are passed over without
 // consuming a tag, consumables likewise.
@@ -129,6 +137,37 @@
 // possible, and it lands hardest on the runaway seeds that are worth keeping --
 // so it is reported as ANN_CACHE_OVERFLOW rather than silently mis-scored, and
 // ANN_LOCK_FLOOR is the lever that prevents it outright.
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt ANN_ETERNAL_ONLY  score only Negative Eternal Blueprint/Brainstorm/Baron/Mime (see ETERNAL ONLY)
+// @opt ANN_FIRST_ANTE=3  first ante whose shops and tags are planned
+// @opt ANN_LAST_ANTE=38  last ante whose shops and tags are planned
+// @opt ANN_PACKS=6  booster packs per ante scanned for Buffoon packs
+// @opt ANN_FIRST_TAG_FRAME=1  earliest shop frame (0-based) a Negative Tag can start on
+// @opt ANN_UNCOMMON_GATE_ANTE=25  last ante where an Uncommon-maximising tag window is allowed
+// @opt ANN_MAX_BRANCH_POINTS=17  seeds with more Negative Tags than this are parked, not searched
+// @opt ANN_BURGLAR_FROM_ANTE=35  ante from which a Negative Burglar is kept to shrink the pool
+// @opt ANN_COLA_EFFICIENCY_NUM=9  numerator of the share of banked colas a tag actually spends
+// @opt ANN_COLA_EFFICIENCY_DEN=10  denominator of that share
+// @opt ANN_LOCK_FLOOR=0  stop keeping Uncommons once this few are left in the pool
+// @opt ANN_SCORE_COMMONS  also score Negative Juggler/Drunkard at +1 (not with ANN_ETERNAL_ONLY)
+// @opt ANN_NO_DOMINANCE  exhaustive search, no dominance pruning: exact per-seed score, slower
+// @opt ANN_DOM_FRONTIER=8  Pareto frontier size kept per branch point for dominance pruning
+// @opt ANN_DOM_EXACT  prune only exact repeats of a state (lossless, slower than the default)
+// @opt ANN_DOM_AUDIT=N  diagnostic: return pruning counters instead of a score (N = 1..5)
+// @opt ANN_PROFILE=N  diagnostic: return work counters instead of a score (N = 1..4)
+// @opt ANN_NODE_PEAK  diagnostic: return the rng node cache high-water mark instead of a score
+// @opt ANN_BRANCH_POINTS  diagnostic: return the seed's branch-point count instead of searching
+// @opt ANN_REPLAY_CHECK  diagnostic: return 1 if every ante redraws identically from a snapshot
+// @opt ANN_INVARIANCE_CHECK  diagnostic: count antes whose shop skeleton ignores the lock set
+// @opt ANN_ETERNAL_CHECK  diagnostic, with ANN_ETERNAL_ONLY: check Eternal stickers against lib
+// @opt ANN_NO_SKELETON_CACHE  draw every ante's shop skeleton afresh instead of caching it
+// @opt ANN_SKEL_WORDS=1664  skeleton cache size in ulongs (2048 under ANN_ETERNAL_ONLY)
+// @opt CACHE_SIZE=2048  rng node cache entries per work-item
+//
+// The host runs every filter carrying this marker one work-group per seed
+// (--group_per_seed), since a seed here is a whole search tree; pass
+// --no_group_per_seed to opt out.
+// @group_per_seed
 #ifndef CACHE_SIZE
 #define CACHE_SIZE 2048
 #endif
@@ -147,6 +186,10 @@
 // run left for the extra Diet Colas to arrive and be spent.
 #ifndef ANN_UNCOMMON_GATE_ANTE
 #define ANN_UNCOMMON_GATE_ANTE 25
+#endif
+// The earliest shop frame, 0-based, a Negative Tag can start on. See FRAMES.
+#ifndef ANN_FIRST_TAG_FRAME
+#define ANN_FIRST_TAG_FRAME 1
 #endif
 // Past this many branch points the seed is parked rather than searched.
 //
@@ -715,7 +758,18 @@ typedef struct AnnAnte {
 // that is the ante's own log; for a second-slot window it is the log of the
 // EARLIER ante whose tag created it, so the points land against the tag that
 // paid for them rather than the ante they happen to land in.
-typedef struct AnnWin { int start, width, limitCards; ann_log* log; } ann_win;
+//
+// `start` is -1 for a window that has not been placed yet: it then begins at
+// the first eligible joker on or after frame `fromFrame`, which needs the
+// ante's skeleton, so ann_ante_walk places it once eligibility is known.
+typedef struct AnnWin { int start, width, limitCards, fromFrame; ann_log* log; } ann_win;
+
+// The first eligible ordinal sitting at or after `card`, or eligCount.
+inline int ann_elig_from_card(const ann_ante* a, int card) {
+    for (int e = 0; e < a->eligCount; e++)
+        if (a->cardIdx[a->eligSlot[e]] >= card) return e;
+    return a->eligCount;
+}
 
 // At most one keep per Uncommon in the pool, and a kept one never comes back.
 #define ANN_MAX_KEEPS 80
@@ -868,7 +922,7 @@ inline void ann_credit(ann_ctx* c, int value, bool isCopy) {
 // ---------------------------------------------------------------------------
 void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
                    shop sh, double totalRate,
-                   const ann_win* wins, int nwins,
+                   ann_win* wins, int nwins,
                    int* colasAfterPacks, bool spendColas, bool scout,
                    ann_skel* sk, ann_log* log) {
     // Every reachable node is ante-keyed, so last ante's slots are unreachable.
@@ -1064,6 +1118,10 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     }
     a->eligCount = eligCount;
 
+    // Place any window waiting for this ante's skeleton (see ann_win).
+    for (int w = 0; w < nwins; w++)
+        if (wins[w].start < 0) wins[w].start = ann_elig_from_card(a, wins[w].fromFrame * frameSize);
+
     // ---- identities, pool by pool ----
     // Nothing below consumes a cache node: each pool is drawn depth-major and
     // every node is handed back (see ann_flush_pool).
@@ -1220,10 +1278,20 @@ void ann_ante_walk(instance* inst, ann_ctx* c, ann_ante* a, int ante,
 // remaining ties. Returns -1 when no window of that width fits before
 // limitCards. Read off the scouting walk, so it is a guess about the committed
 // stream, not a promise -- the committed walk is what gets scored.
-int ann_pick_window(const ann_ante* a, int ante, int width, int limitCards, int minStart,
+//
+// Only frame starts are candidates (see FRAMES): the window opens on the first
+// eligible joker at or after frame f's first card, for f >= minFrame. A frame
+// with no eligible joker in it gives the same start as the next one and is
+// skipped.
+int ann_pick_window(const ann_ante* a, int ante, int width, int limitCards, int minFrame,
                     bool byCopy, int* outCopies, int* outUnc) {
     int best = -1, bc = 0, bu = 0;
-    for (int ws = minStart; ws + width <= a->eligCount; ws++) {
+    int prev = -1, ws = 0;
+    for (int f = minFrame; f * a->frameSize < limitCards; f++) {
+        while (ws < a->eligCount && a->cardIdx[a->eligSlot[ws]] < f * a->frameSize) ws++;
+        if (ws == prev) continue;
+        prev = ws;
+        if (ws + width > a->eligCount) break;
         // Eligible ordinals run in card order, so once the far end of the
         // window is past the limit it is past it for every later start.
         if (a->cardIdx[a->eligSlot[ws + width - 1]] >= limitCards) break;
@@ -1301,14 +1369,15 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
     int nw = 0;
     int colasAfterPacks = 0;
 
-    // A second-slot tag taken last ante fires from the head of this ante's
-    // queue. It is known before any choice is made here, so it goes into the
+    // A second-slot tag taken last ante fires from the first frame of this
+    // ante's queue it is allowed to. It is known before any choice is made here, so it goes into the
     // first walk rather than being bolted on afterwards -- otherwise a
     // first-slot window in the same ante would be chosen off a stream missing
     // this window's locks.
     ann_log* pendLog = 0;
     if (c->pendingWidth > 0) {
-        wins[nw].start = 0;
+        wins[nw].start = -1;   // placed by the walk, on frame ANN_FIRST_TAG_FRAME
+        wins[nw].fromFrame = ANN_FIRST_TAG_FRAME;
         wins[nw].width = c->pendingWidth;
         wins[nw].limitCards = 1 << 30;   // a second-slot window has no half limit
         wins[nw].log = c->pendingLog;    // score it against the tag that paid
@@ -1340,16 +1409,30 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
                   choice == ANN_T1_COPY || choice == ANN_T1_UNC, sk, log);
     log->colas = colasAfterPacks;
     log->frameSize = a->frameSize;
+    if (pendLog != 0 && nw > 0 && wins[0].start >= 0 && wins[0].start < a->eligCount) {
+        // Where the earlier ante's T2 window actually opened, for the printout.
+        pendLog->startCard = a->cardIdx[a->eligSlot[wins[0].start]];
+        pendLog->frameSize = a->frameSize;
+    }
 
     if (choice == ANN_T1_COPY || choice == ANN_T1_UNC) {
         // Everything inside a pending window is already Negative, so a
-        // first-slot window here starts after it.
-        int minStart = nw > 0 ? wins[0].start + wins[0].width : 0;
+        // first-slot window here starts on the first frame boundary past it.
+        int minFrame = ANN_FIRST_TAG_FRAME;
+        if (nw > 0 && wins[0].start >= 0) {
+            int e = wins[0].start + wins[0].width;
+            if (e > a->eligCount) e = a->eligCount;
+            if (e > wins[0].start) {
+                int f = a->cardIdx[a->eligSlot[e - 1]] / a->frameSize + 1;
+                if (f > minFrame) minFrame = f;
+            }
+        }
+        int minStart = ann_elig_from_card(a, minFrame * a->frameSize);
         int width = 1 + ann_colas_effective(colasAfterPacks);
 
         // How many eligible targets are left in reach at all: eligible ordinals
         // run in card order, so this is just how many sit before halfCards from
-        // minStart on.
+        // the first legal start on.
         //
         // A chained tag used to be REFUSED when the stock was wider than the
         // room left, which made banking more colas strictly worse -- a branch
@@ -1366,7 +1449,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
         if (width > fits) width = fits;
 
         int copies = 0, unc = 0;
-        int ws = ann_pick_window(a, ante, width, a->halfCards, minStart,
+        int ws = ann_pick_window(a, ante, width, a->halfCards, minFrame,
                                  choice == ANN_T1_COPY, &copies, &unc);
         if (ws < 0) return false;
         // A copy-joker window holding no copy joker is just a worse NONE.
@@ -1382,6 +1465,7 @@ bool ann_ante_step(instance* inst, ann_ctx* c, ann_ante* a, int ante,
             return false;
         }
         wins[nw].start = ws;
+        wins[nw].fromFrame = 0;   // placed already
         wins[nw].width = width;
         wins[nw].limitCards = a->halfCards;
         wins[nw].log = log;   // a first-slot window scores in its own ante
@@ -1846,11 +1930,14 @@ void ann_explain(long best, const int* bpAnte, int M,
         // `colas` is the raw stock; the width is 1 + 90% of it, so both are
         // shown rather than leaving the shortfall unexplained.
         if (ch == ANN_T1_COPY || ch == ANN_T1_UNC) {
-            printf("  colas %d (x0.9 = %d) -> %d negatives, from shop card %d  (%d copy, %d uncommon)  = +%d",
-                   g->colas, g->width - 1, g->width, g->startCard, g->copies, g->uncommons, g->points);
+            printf("  colas %d (x0.9 = %d) -> %d negatives, from shop card %d (frame %d)  (%d copy, %d uncommon)  = +%d",
+                   g->colas, g->width - 1, g->width, g->startCard,
+                   g->frameSize > 0 ? g->startCard / g->frameSize : -1,
+                   g->copies, g->uncommons, g->points);
         } else if (ch == ANN_T2) {
-            printf("  colas %d (x0.9 = %d) -> %d negatives, fires ante %d from card 0  = +%d",
-                   g->colas, g->width - 1, g->width, bpAnte[d] + 1, g->points);
+            printf("  colas %d (x0.9 = %d) -> %d negatives, fires ante %d from shop card %d (frame %d)  = +%d",
+                   g->colas, g->width - 1, g->width, bpAnte[d] + 1, g->startCard,
+                   g->frameSize > 0 && g->startCard >= 0 ? g->startCard / g->frameSize : -1, g->points);
         } else {
             printf("  bank %d cola(s)", g->colas);
         }

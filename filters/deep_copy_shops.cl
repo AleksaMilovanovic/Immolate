@@ -26,6 +26,11 @@
 //
 // The Rare identity node is the only one that resamples, and with 8 of 19 rares
 // unlocked those chains are short, so the default node cache is ample.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt DCS_FIRST_ANTE=3  first ante whose shops are scanned
+// @opt DCS_LAST_ANTE=38  last ante whose shops are scanned
+
 #define CACHE_SIZE 256
 #include "lib/immolate.cl"
 

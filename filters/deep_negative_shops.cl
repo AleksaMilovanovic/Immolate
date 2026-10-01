@@ -37,6 +37,14 @@
 // scores as other regardless of identity. Uncommon/Rare shop identities and all
 // Buffoon identities are still drawn because their values affect the score or
 // temporary within-pack locks.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt DNS_FIRST_ANTE=3  first ante whose shops, packs and tags are counted
+// @opt DNS_LAST_ANTE=38  last ante whose shops, packs and tags are counted
+// @opt DNS_PACKS=6  shop packs drawn per ante (only Buffoon Packs are scanned)
+// @opt DNS_CHUNK=1024  shop joker slots staged before identities are drawn (speed only, same result)
+// @opt DNS_PACKS_LEGACY  use the old one-draw-at-a-time pack loop, for A/B checks only
+
 // Older versions used one global shop-pack RNG stream, so only versions whose
 // pack node includes the ante may discard completed-ante nodes.
 #define DNS_VERSION_AT_MOST(v1,v2,v3,v4) \

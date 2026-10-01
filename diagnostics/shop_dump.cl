@@ -4,6 +4,10 @@
 // unlocked). Six slots is the opening shop plus two rerolls. Run on one seed:
 //   immolate -f shop_dump -s SEED -n 1 -g 1
 // Used to compare GPU, CPU and the game draw by draw.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt SD_SLOTS=6  shop cards printed per ante
+
 #include "lib/immolate.cl"
 #ifndef SD_SLOTS
 #define SD_SLOTS 6

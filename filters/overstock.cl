@@ -1,3 +1,9 @@
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt CACHE_SIZE=32  rng node cache slots per work-item
+// @opt OS_MAX_ANTE=38  last ante whose voucher is drawn
+// @opt OS_OVERSTOCK_BY=6  Overstock must appear by this ante (inclusive)
+// @opt OS_PLUS_BY=11  Overstock Plus must appear by this ante (inclusive)
+
 // With the per-ante reset below only one ante's nodes are live: one voucher
 // draw plus its resample chain. The node array is the bulk of `instance`, which
 // is local memory on a GPU, so its size is occupancy.

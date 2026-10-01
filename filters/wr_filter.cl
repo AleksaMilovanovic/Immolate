@@ -1,6 +1,9 @@
 // Searches for seeds with Perkeo from The Soul in the first ante, plus a buyable Hermit or Temperance tarot in the first shop.
 // This keeps the Perkeo-from-Soul requirement while removing the second-legendary requirement.
 
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt WR_PREFILTER_LEVEL=1  prefilter pass 1: 1 = first pack type only, 2 = the full Perkeo gate
+
 // A seed that reaches ante 38 creates up to ~475 distinct RNG nodes (17-18 per
 // ante for shop card types, rarities, editions, stickers, tarots, planets,
 // packs, and pack jokers). The default cache holds 64. Beyond that, init_node

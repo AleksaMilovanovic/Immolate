@@ -24,6 +24,19 @@
 //  * One shop scan finds both jokers; it stops once both are found or once it
 //    passes the last ante that has an Immolate for a joker not yet found.
 //  * Joker locks: see the LOCKED / UNLOCKED lists below the include.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt SS_TRIGGERS=2  Sixth Sense spectral creations per ante checked for Immolate
+// @opt SS_SEANCE_TRIGGERS=3  Seance spectral creations per ante checked for Immolate (0 ignores Seance)
+// @opt SS_MAX_ANTE=5  last ante scanned for the jokers and their Immolates
+// @opt SS_SHOP_ANTE1=4  ante-1 shop slots searched for Sixth Sense / Seance
+// @opt SS_SHOP_LATER=12  shop slots per later ante searched for Sixth Sense / Seance
+// @opt SS_PACKS_ANTE1=3  ante-1 packs searched for Sixth Sense / Seance
+// @opt SS_PACKS_LATER=6  packs per later ante searched for Sixth Sense / Seance
+// @opt SS_NEXT_ANTE_ONLY  only count creations in antes after the one the joker was found in
+// @opt SS_PREFILTER  run the creation check as a separate two-pass prefilter (speed only)
+// @opt SS_DIAG_NO_SCAN  diagnostic: score the creation check only, skipping the shop scan
+
 #include "lib/immolate.cl"
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,13 @@
 //
 // Deadlines are inclusive: the test runs after that ante's voucher is drawn, so
 // an ante-8 Blank passes EV_STAGE1_BY 8.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt CACHE_SIZE=128  rng node cache slots per work-item
+// @opt EV_MAX_ANTE=38  last ante whose voucher is drawn
+// @opt EV_STAGE1_BY=9  Overstock and Blank must both appear by this ante (inclusive)
+// @opt EV_STAGE2_BY=14  Overstock Plus and Antimatter must both appear by this ante (inclusive)
+
 #ifndef CACHE_SIZE
 #define CACHE_SIZE 128
 #endif
