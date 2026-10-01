@@ -24,6 +24,11 @@
 // A filter consuming this pool must reproduce the same RNG draws itself:
 // filter() always starts from a fresh instance. Copy the loop below (or call
 // pack_has_soul the same way) rather than assuming the Soul's position.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt EAP_PACKS_ANTE1=4  ante-1 pack slots checked for The Soul
+// @opt EAP_PACKS_ANTE2=6  ante-2 pack slots checked for The Soul
+
 #include "lib/immolate.cl"
 
 #ifndef EAP_PACKS_ANTE1

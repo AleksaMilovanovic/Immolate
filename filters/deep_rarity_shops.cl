@@ -32,6 +32,12 @@
 // Legendary never comes from a shop or Buffoon Pack, so it is not counted.
 // Buffoon Pack cards are counted the same way; the in-pack reroll locks only
 // matter for identities, which are not drawn.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt DRS_FIRST_ANTE=3  first ante whose shops and packs are counted
+// @opt DRS_LAST_ANTE=38  last ante whose shops and packs are counted
+// @opt DRS_PACKS=6  shop packs drawn per ante (only Buffoon Packs are counted)
+
 #define CACHE_SIZE 512
 #include "lib/immolate.cl"
 

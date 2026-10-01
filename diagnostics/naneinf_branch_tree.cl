@@ -19,6 +19,11 @@
 // or -- when BOTH tag slots are Negative -- 4, which is the case that makes a
 // seed much more expensive than a count of branch points suggests.
 //
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt ANN_FIRST_ANTE=3  first ante whose Negative Tags are branch points
+// @opt ANN_LAST_ANTE=38  last ante drawn (a second-slot tag here has no next ante)
+// @opt NBT_ARITIES  print one line per branch point: its ante and how many choices it offers
+//
 // Keep these in step with the filter's own defaults.
 #define CACHE_SIZE 64
 #include "lib/immolate.cl"

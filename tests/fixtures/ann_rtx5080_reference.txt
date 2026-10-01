@@ -1,27 +1,27 @@
 # analyze_naneinf_negatives reference scores.
 #
-# Regenerated after copy jokers became OWNED: Blueprint and Brainstorm are
-# locked outside a Negative Tag window (one of each is held, no Showman) and
-# unlocked only over a window's span, where Showman is held. They no longer
-# turn up in ordinary shops or Buffoon packs, so farming Diet Colas off them
-# mostly stops and a natural Negative one outside a window cannot appear.
-# Diet Colas also now count at most once per shop frame.
+# Regenerated after Negative Tags became FRAME-ALIGNED: a tag only starts at the
+# first eligible joker of a shop frame, never on the ante's first frame
+# (ANN_FIRST_TAG_FRAME = 1), and a second-slot tag fires from that frame of the
+# next ante rather than card 0. 6 of 32 down, 24 unchanged, 2 up, -4% overall.
+# The two that rose are draw-stream divergence: a different window keeps
+# different Uncommons, which changes every later draw.
 #
-# Scores fell sharply -- 26 of 32 down, 6 unchanged, none up, -39% overall.
+# Earlier: copy jokers are OWNED (locked outside a tag window's Showman span),
+# and Diet Colas count at most once per shop frame.
 #
-# Generated on an RTX 5080, not pocl; the earlier baseline was pocl, and the
-# two agreed on all 32 before these model changes.
+# Run with the default one work-group per seed. Generated on an RTX 5080.
 1111112U 310
 1111112V 105
 1111112W 5
 1111112X 5
-1111112Y 210
+1111112Y 200
 1111112Z 315
-11111131 205
-11111132 525
+11111131 120
+11111132 420
 11111133 620
-11111134 120
-11111135 410
+11111134 20
+11111135 305
 11111136 625
 11111137 100
 11111138 100
@@ -30,11 +30,11 @@
 1111113B 0
 1111113C 0
 1111113D 5
-1111113E 320
+1111113E 515
 1111113F 410
-1111113G 215
+1111113G 220
 1111113H 210
-1111113I 105
+1111113I 5
 1111113J 205
 1111113K 305
 1111113L 510

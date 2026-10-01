@@ -38,6 +38,13 @@
 // unlocked. Note init_unlocks(ante 2) re-enables Negative Tag; the list below
 // is re-applied every ante so it is never undone by that.
 //
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt CACHE_SIZE=256  rng node cache slots per work-item
+// @opt NT_MAX_ANTE=38  last ante whose tags are counted
+// @opt NT_CHUNK=19  antes drawn per batch; -c early exits are checked between batches
+// @opt NT_FIRST_SLOT_ONLY  skip second-slot tags (half the work; second-slot field reads 0)
+// @opt NT_NO_LOCKS  diagnostic: no tag locks at all, so no tag rerolls (not the real game)
+//
 // With the per-ante cache reset below, only one ante's nodes are ever live: two
 // tag draws plus their resample chains, which with three tags locked is a
 // handful. 64 is already generous. This is not just headroom -- the node array

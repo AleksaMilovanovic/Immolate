@@ -22,6 +22,14 @@
 // node's state is arithmetic while reading a value from it costs a randomseed.
 // Only 0.3% of jokers are Negative, so the rarity value is computed for those
 // and skipped for the rest -- the state still moves, so the stream is exact.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt CACHE_SIZE=128  rng node cache slots per work-item
+// @opt ENR_FIRST_ANTE=3  first ante whose shops are scanned
+// @opt ENR_LAST_ANTE=10  last ante whose shops are scanned
+// @opt ENR_WEIGHT_BASE=20  a negative Rare in ante A scores (ENR_WEIGHT_BASE - A)
+// @opt ENR_COUNT_ONLY  score the plain count of negative Rares instead of the weighted total
+
 #ifndef CACHE_SIZE
 #define CACHE_SIZE 128
 #endif

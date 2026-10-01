@@ -79,6 +79,21 @@
 // identities, sticker and rental polls, and consumable identities all live on
 // their own nodes that nothing here reads, and nothing later reads them
 // either, so not drawing them shifts no value this filter observes.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt CACHE_SIZE=256  rng node cache slots per work-item
+// @opt ANR_LAST_ANTE=8  last ante whose shops, tags and creations are counted
+// @opt ANR_TAG_FRAME_DIV=2  a pending Negative Tag may wait out 1/N of the ante's shop frames
+// @opt ANR_JUDGEMENT_TRIGGERS=2  Judgement creations per ante checked for a negative Rare
+// @opt ANR_WRAITH_TRIGGERS=3  Wraith creations per ante checked for Negative once Wraith is reachable
+// @opt ANR_SPECTRAL_TRIGGERS=3  Sixth Sense / Seance spectral creations per ante checked for a Wraith
+// @opt ANR_SHOP_ANTE1=4  ante-1 shop slots searched for Sixth Sense / Seance
+// @opt ANR_SHOP_LATER=12  shop slots per later ante searched for Sixth Sense / Seance
+// @opt ANR_PACKS_ANTE1=3  ante-1 packs searched for Sixth Sense / Seance
+// @opt ANR_PACKS_LATER=6  packs per later ante searched for Sixth Sense / Seance
+// @opt ANR_NEXT_ANTE_ONLY  a joker found in ante A only starts creating spectrals in ante A+1
+// @opt ANR_DEBUG  print a per-ante, per-route breakdown (run on one seed with -n 1 -g 1)
+
 #ifndef CACHE_SIZE
 #define CACHE_SIZE 256
 #endif

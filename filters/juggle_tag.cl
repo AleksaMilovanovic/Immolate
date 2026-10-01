@@ -11,6 +11,12 @@
 // and init_unlocks lifts them on schedule (all of them by ante 6), then
 // JT_LOCKED_TAGS is the profile's own unearned tags -- edit it to match your
 // profile, or leave it empty ({}) for a completed one.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt CACHE_SIZE=32  rng node cache slots per work-item
+// @opt JT_ANTE=39  ante whose first tag must be the Juggle Tag
+// @opt JT_RAW  diagnostic: score the tag itself instead of 1/0, to check the lock set
+
 #ifndef CACHE_SIZE
 #define CACHE_SIZE 32
 #endif

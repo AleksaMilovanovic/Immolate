@@ -1,34 +1,37 @@
 // analyze_naneinf_negatives with the strategy printout turned on. Same search,
 // same score; it just says what the winning line does. One seed at a time:
-//   immolate -f analyze_naneinf_explain -s SEED -n 1 -g 1 -c 0
-// It runs the whole search TWICE -- once to find the best line, once to price
-// every alternative against it -- so it costs about double the plain filter on
-// the same seed, and the plain filter's own cost grows with the branch-point
-// count. Add -D ANN_NO_ALTS to skip the second pass and print only the winning
-// line; that halves it and loses just the "alternatives" column.
+//   immolate -f analyze_naneinf_explain -s SEED -n 1
 //
-// Dominance pruning is OFF here, unlike the plain filter where it is on by
-// default. Pruning is a bet that pays off across a pool -- it keeps the RANKING
-// while letting an individual mid-pool seed's score slip -- and explaining one
-// named seed is exactly the case the bet is not made for. It also makes the
-// alternatives column traversal-dependent: each lane of a --group_per_seed run
-// carries its own frontier, so lanes prune differently and price the
-// alternatives differently, even though they agree on the winner. Pass
-// -D ANN_DOMINANCE to opt back in if a seed is too deep to explain otherwise,
-// and read the alternatives as approximate when you do.
-#ifndef ANN_DOMINANCE
-#define ANN_NO_DOMINANCE
-#endif
-
-// --group_per_seed DOES work here, and on a deep seed it is the difference
-// between minutes and seconds, but it needs the seed in a file rather than -s:
-//   echo SEED > one.txt
-//   immolate -f analyze_naneinf_explain --from one.txt -n 1 -g 1 -c 0 --group_per_seed
+// Defaults are the fast ones, the same as the plain filter: dominance pruning
+// ON, the alternatives pass OFF, and one work-group per seed (the host turns
+// --group_per_seed on for every ANN filter; --no_group_per_seed turns it off).
+// So the score printed is the plain filter's score for that seed.
+//
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt ANN_ALTS  also price every alternative at each branch point (a second full search, ~2x)
+// @opt ANN_NO_DOMINANCE  exhaustive search: the exact score for this seed, much slower on deep seeds
+//
+// ANN_ALTS runs the whole search TWICE -- once to find the best line, once to
+// price every alternative against it -- so it costs about double. With pruning
+// on, the alternatives column is traversal-dependent: each lane carries its own
+// frontier, so lanes prune differently and price the alternatives differently,
+// even though they agree on the winner. Read it as approximate unless
+// ANN_NO_DOMINANCE is set too.
+//
+// Pruning is a bet that pays off across a pool -- it keeps the RANKING while
+// letting an individual mid-pool seed's score slip -- so for one named seed's
+// exact score, pass ANN_NO_DOMINANCE (see the DOMINANCE PRUNING note in
+// analyze_naneinf_negatives.cl). Expect hours, not minutes, on a seed with
+// more than a dozen branch points; diagnostics/naneinf_branch_tree.cl says how
+// many leaves a seed has before you commit to it.
+//
 // The lanes split the tree, elect the one that actually held the winner, and
-// only that lane prints -- so the output is the same single strategy, byte for
-// byte, as the one-lane run. (It used to be rejected at compile time, because
-// without the election every lane printed its own share's best line.)
+// only that lane prints -- so the output is the same single strategy as a
+// one-lane run.
 //
 // Do not point it at a range.
+#ifndef ANN_ALTS
+#define ANN_NO_ALTS
+#endif
 #define ANN_EXPLAIN
 #include "filters/analyze_naneinf_negatives.cl"

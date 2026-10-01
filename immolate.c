@@ -2,6 +2,9 @@
 #include "lib/supplier.h"
 #include "lib/scorefile.h"
 #include <errno.h>
+#ifndef _WIN32
+#include <dirent.h>
+#endif
 #include <time.h>
 
 // Wall-clock seconds from a monotonic-ish source. `clock()` returns PROCESS CPU
@@ -43,6 +46,160 @@ static const char* filter_dir(const char* executable_dir, const char* filter) {
     return NULL;
 }
 
+// Does a kernel source, or any project source it #includes, contain `marker`?
+// Follows includes the way fnv1a_source_tree does, so a wrapper filter inherits
+// what the filter it wraps declares.
+static int source_tree_has(const char* path, const char* exe_dir, const char* marker, int depth) {
+    size_t n = 0;
+    unsigned char* buf = read_whole_file(path, &n);
+    if (!buf) return 0;
+    int found = strstr((const char*)buf, marker) != NULL;
+    if (!found && depth > 0) {
+        const char* p = (const char*)buf;
+        while (!found && (p = strstr(p, "#include \"")) != NULL) {
+            p += 10;
+            const char* end = strchr(p, '"');
+            if (!end) break;
+            size_t len = (size_t)(end - p);
+            if (len > 0 && len < 200) {
+                char rel[208];
+                memcpy(rel, p, len);
+                rel[len] = '\0';
+                for (size_t k = 0; k < len; k++) if (rel[k] == '/') rel[k] = PATH_SEPARATOR[0];
+                char inc[MAX_PATH + 256];
+                snprintf(inc, sizeof inc, "%s%s%s", exe_dir, PATH_SEPARATOR, rel);
+                found = source_tree_has(inc, exe_dir, marker, depth - 1);
+            }
+            p = end + 1;
+        }
+    }
+    free(buf);
+    return found;
+}
+
+// Filters that mark themselves `// @group_per_seed` (in their own source or one
+// they include) get one work-group per seed by default: a seed there is a whole
+// search tree, and one work-item per seed leaves the rest of the group idle.
+#define GROUP_PER_SEED_MARKER "// @group_per_seed"
+
+// ---- `-h`: every filter's --build_opts, read from its `// @opt` lines ----
+#define HELP_MAX_FILES 512
+static int help_name_cmp(const void* a, const void* b) {
+    return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
+// The .cl files in base/sub, sorted, as malloc'd names without the extension.
+static int list_cl_files(const char* base, const char* sub, char** names, int max) {
+    int n = 0;
+#ifdef _WIN32
+    char pattern[MAX_PATH + 64];
+    snprintf(pattern, sizeof pattern, "%s%s%s%s*.cl", base, PATH_SEPARATOR, sub, PATH_SEPARATOR);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        size_t len = strlen(fd.cFileName);
+        if (len > 3 && n < max && strcmp(fd.cFileName + len - 3, ".cl") == 0) {
+            names[n] = (char*)malloc(len - 2);
+            memcpy(names[n], fd.cFileName, len - 3);
+            names[n][len - 3] = '\0';
+            n++;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    char dirPath[MAX_PATH + 64];
+    snprintf(dirPath, sizeof dirPath, "%s%s%s", base, PATH_SEPARATOR, sub);
+    DIR* d = opendir(dirPath);
+    if (!d) return 0;
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        size_t len = strlen(e->d_name);
+        if (len > 3 && n < max && strcmp(e->d_name + len - 3, ".cl") == 0) {
+            names[n] = (char*)malloc(len - 2);
+            memcpy(names[n], e->d_name, len - 3);
+            names[n][len - 3] = '\0';
+            n++;
+        }
+    }
+    closedir(d);
+#endif
+    qsort(names, (size_t)n, sizeof names[0], help_name_cmp);
+    return n;
+}
+
+// One filter's options: its `// @opt NAME[=DEFAULT]  description` lines, the
+// filters it includes (whose options it also takes), and whether it runs one
+// work-group per seed. Prints nothing for a filter with none of those unless
+// `always` is set. Returns 1 if it printed.
+static int print_filter_opts(const char* base, const char* sub, const char* name, int always) {
+    char path[MAX_PATH + 288];
+    snprintf(path, sizeof path, "%s%s%s%s%s.cl", base, PATH_SEPARATOR, sub, PATH_SEPARATOR, name);
+    size_t n = 0;
+    char* buf = (char*)read_whole_file(path, &n);
+    if (!buf) return 0;
+    int grouped = source_tree_has(path, base, GROUP_PER_SEED_MARKER, 4);
+    int printed = 0;
+    for (char* line = buf; line && *line; ) {
+        char* next = strchr(line, '\n');
+        if (next) *next++ = '\0';
+        size_t ll = strlen(line);
+        if (ll > 0 && line[ll - 1] == '\r') line[--ll] = '\0';
+        const char* t = line;
+        while (*t == ' ' || *t == '\t') t++;
+        int isOpt = strncmp(t, "// @opt ", 8) == 0;
+        int isInc = strncmp(t, "#include \"filters/", 18) == 0 || strncmp(t, "#include \"diagnostics/", 22) == 0;
+        if ((isOpt || isInc) && !printed) {
+            printf_s("\n%s%s\n", name, grouped ? "   [one work-group per seed by default]" : "");
+            printed = 1;
+        }
+        if (isOpt) {
+            const char* opt = t + 8;
+            const char* gap = strstr(opt, "  ");
+            int nameLen = gap ? (int)(gap - opt) : (int)strlen(opt);
+            const char* desc = gap ? gap : "";
+            while (*desc == ' ') desc++;
+            printf_s("  %-34.*s %s\n", nameLen, opt, desc);
+        } else if (isInc) {
+            const char* inc = strchr(t, '/') + 1;
+            const char* end = strstr(inc, ".cl\"");
+            if (end) printf_s("  (and every option of %.*s)\n", (int)(end - inc), inc);
+        }
+        line = next;
+    }
+    if (!printed && always) {
+        printf_s("\n%s%s\n  (no build options)\n", name, grouped ? "   [one work-group per seed by default]" : "");
+        printed = 1;
+    }
+    free(buf);
+    return printed;
+}
+
+// `only` names one filter (from -f), or NULL for all of them.
+static void print_filter_options(const char* only) {
+    char exeDir[MAX_PATH];
+    getExecutableDir(exeDir);
+    const char* bases[2] = { exeDir, "." };
+    static const char* const subs[] = { "filters", "diagnostics" };
+    printf_s("\n\nFilter build options. Pass any of these with --build_opts \"-D NAME\" or \"-D NAME=VALUE\";\n"
+             "several go in one string, e.g. --build_opts \"-D ANN_NO_DOMINANCE -D ANN_ALTS\". The value after\n"
+             "= is the default.\n");
+    for (int b = 0; b < 2; b++) {
+        int any = 0;
+        for (size_t d = 0; d < sizeof subs / sizeof subs[0]; d++) {
+            char* names[HELP_MAX_FILES];
+            int n = list_cl_files(bases[b], subs[d], names, HELP_MAX_FILES);
+            if (n > 0) any = 1;
+            if (n > 0 && !only) printf_s("\n---- %s ----\n", subs[d]);
+            for (int i = 0; i < n; i++) {
+                if (!only || strcmp(only, names[i]) == 0) print_filter_opts(bases[b], subs[d], names[i], only != NULL);
+                free(names[i]);
+            }
+        }
+        if (any) return;   // found the sources next to the executable; do not list twice
+    }
+    printf_s("(no filters/ or diagnostics/ folder found next to the executable or in the working directory)\n");
+}
+
 static cl_int enqueue_1d(cl_command_queue queue, cl_kernel kernel, size_t* globalSize, size_t* localSize, unsigned int numGroups) {
     cl_int err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, globalSize, localSize, 0, NULL, NULL);
     if (err == CL_INVALID_WORK_GROUP_SIZE && *localSize > 1) {
@@ -69,7 +226,7 @@ static int cli_is_known_option(const char* text) {
     static const char* options[] = {
         "-h", "-f", "-s", "-n", "-c", "-p", "-d", "-g", "-l", "--build_opts",
         "--list_devices", "--no_cache", "--verbose_build", "--single_pass",
-        "--batch", "--progress", "--to", "--scores_to", "--from", "--group_per_seed", "--launch_seconds",
+        "--batch", "--progress", "--to", "--scores_to", "--from", "--group_per_seed", "--no_group_per_seed", "--launch_seconds",
         "--to_parts", "--resume"
     };
     for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
@@ -212,6 +369,8 @@ int main(int argc, char **argv) {
     unsigned int forcedLocal = 0;
     const char* extraBuildOpts = NULL;
     int groupPerSeed = 0;  // --group_per_seed: one work-group per seed
+    int noGroupPerSeed = 0; // --no_group_per_seed: refuse the filter's default
+    int showHelp = 0;      // -h: printed once -f is known, so it can be narrowed to one filter
     int noCache = 0;
     int verboseBuild = 0;
     int singlePass = 0;
@@ -243,8 +402,7 @@ int main(int argc, char **argv) {
     char* filter = "erratic_flush_five";
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-h")==0) {
-            printf_s("Valid command line arguments:\n-h        Shows this help dialog.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--launch_seconds <S>  In a plain single-pass search, split the range into kernel launches of about S seconds each (default 1). 0 runs the whole range as one launch. See docs/kernel_profile.md: on a display GPU under WDDM, single launches longer than ~2 s intermittently ran 7x slower.--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in FILE instead of a rank range. FILE is either a seed-supplier file (made with --to) or a plain-text seed list: a filter's printed \"SEED (score)\" output, or one seed per line. Text lists are sorted and deduplicated, and lines that are not seeds are counted and ignored. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--group_per_seed  Give each seed a whole work-group instead of one work-item, and define GROUP_PER_SEED for the filter, so a filter that splits its own work across get_local_id can use every lane on one seed. Only affects the --from print path. Use it when a filter's per-seed cost is large and uneven; it does nothing for cheap filters.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
-           return 0;
+            showHelp = 1;
         }
         if (strcmp(argv[i],  "-p")==0) {
             if (!cli_value_available(i, argc, argv)) return EXIT_FAILURE;
@@ -276,6 +434,9 @@ int main(int argc, char **argv) {
             // own search across the lanes. Only the --from print path uses it;
             // see search_ranks_grouped.
             groupPerSeed = 1;
+        }
+        if (strcmp(argv[i],  "--no_group_per_seed")==0) {
+            noGroupPerSeed = 1;
         }
         if (strcmp(argv[i],  "--build_opts")==0) { // DIAGNOSTIC: extra clBuildProgram options
             if (i + 1 >= argc) { fprintf_s(stderr, "--build_opts requires a value.\n"); return EXIT_FAILURE; }
@@ -443,6 +604,13 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
+    if (showHelp) {
+        int userF = 0;
+        for (int i = 1; i < argc; i++) if (strcmp(argv[i], "-f") == 0) userF = 1;
+        printf_s("Valid command line arguments:\n-h        Shows this help dialog, then every filter's build options. With -f F, only F's.\n-f <F>    Sets the filter used by Immolate to F. Defaults to erratic_flush_five.\n-s <S>    Sets the starting seed to S. Defaults to empty seed. Use \"random\" for a random starting seed.\n-n <N>    Sets the number of seeds to search to N. Defaults to full seed pool.\n-c <C>    Prints every seed whose score is at least C. Defaults to 1.\n-p <P>    Sets the platform ID of the CL device being used to P. Defaults to 0.\n-d <D>    Sets the device ID of the CL device being used to D. Defaults to 0.\n-g <G>    Sets the number of work-groups to G. Defaults to 16 per compute unit on the selected device. Use -g 1 with -n 1 for single-seed analysis.\n\n--list_devices   Lists information about the detected CL devices.\n--no_cache       Do not load or save the compiled kernel binary (forces a full rebuild).\n--verbose_build  Print the kernel compiler's log (register usage and spills on NVIDIA). Implies --no_cache.\n--single_pass    Ignore a filter's prefilter and run everything in one pass.\n--launch_seconds <S>  In a plain single-pass search, split the range into kernel launches of about S seconds each (default 1). 0 runs the whole range as one launch. See docs/kernel_profile.md: on a display GPU under WDDM, single launches longer than ~2 s intermittently ran 7x slower.--batch <B>      Seeds per batch in a two-pass search or --scores_to run. Defaults to 67108864 normally and 1048576 with --scores_to.\n--progress <P>   In a batched search, print progress to stderr every P batches. Defaults to off.\n--to <FILE>      Write every seed whose score is at least the cutoff to seed-supplier file FILE instead of printing it.\n--scores_to <FILE>  Write one exact signed 64-bit score per rank to FILE in rank order. Range-only; cannot be combined with --to, --from, --to_parts, or --resume. Exact scoring always uses cutoff 0, so an explicit -c must be 0.\n--from <FILE>    Search only the seeds listed in FILE instead of a rank range. FILE is either a seed-supplier file (made with --to) or a plain-text seed list: a filter's printed \"SEED (score)\" output, or one seed per line. Text lists are sorted and deduplicated, and lines that are not seeds are counted and ignored. -n caps how many are read. Prefilters are skipped. FILE may be the base name of a --to_parts run: every finished part is read in order and unfinished ones are skipped, so a pool can be searched while it is still being built. May be repeated to read several files.\n--to_parts <K>   Split the --to output into K files, FILE.part1of<K> .. FILE.part<K>of<K>, each covering an equal share of the input seeds (-n, or the whole pool). Defaults to 1.\n--group_per_seed  Give each seed a whole work-group instead of one work-item, and define GROUP_PER_SEED for the filter, so a filter that splits its own work across get_local_id can use every lane on one seed. Works for printed results from -s/-n ranges and --from lists; not with --to or --scores_to. Filters marked [one work-group per seed by default] below (the analyze_naneinf family) get it automatically.\n--no_group_per_seed  Turn that default off.\n--resume <PART>  Continue an interrupted --to run. PART is the part file that was being written (e.g. pool.seeds.part12of24); the filter, cutoff, output name, part count and range come from it, and the search restarts just after the last seed it holds. Pass the same --from if the original run used one.");
+        print_filter_options(userF ? filter : NULL);
+        return 0;
+    }
     // --resume: everything about the run is taken from the interrupted part
     // file, so it cannot be resumed under different settings by mistake. Any
     // conflicting flag on this command line is an error, not a silent override.
@@ -565,6 +733,31 @@ int main(int argc, char **argv) {
     strcpy_s(include_path, sizeof include_path, "-I \"");
     strcat_s(include_path, sizeof include_path, executable_dir);
     strcat_s(include_path, sizeof include_path, "\"");
+    // One work-group per seed: on request, or by default for a filter that
+    // marks itself with GROUP_PER_SEED_MARKER. Only the printing paths run the
+    // grouped kernel; the collecting ones (--to, and --scores_to) give each
+    // work-item its own seed, and a filter built with GROUP_PER_SEED would then
+    // split one seed's work across lanes holding DIFFERENT seeds. So it is
+    // refused there when asked for, and simply not defaulted there.
+    {
+        const char* fdir = filter_dir(executable_dir, filter);
+        if (groupPerSeed && noGroupPerSeed) {
+            fprintf_s(stderr, "--group_per_seed and --no_group_per_seed cannot both be given.\n");
+            return EXIT_FAILURE;
+        }
+        if (groupPerSeed && (toFile || scoresToFile)) {
+            fprintf_s(stderr, "--group_per_seed only works when results are printed; drop --to / --scores_to, or --group_per_seed.\n");
+            return EXIT_FAILURE;
+        }
+        if (!groupPerSeed && !noGroupPerSeed && !toFile && !scoresToFile && fdir) {
+            char fpath[MAX_PATH + 288];
+            snprintf(fpath, sizeof fpath, "%s%s%s%s%s.cl", executable_dir, PATH_SEPARATOR, fdir, PATH_SEPARATOR, filter);
+            if (source_tree_has(fpath, executable_dir, GROUP_PER_SEED_MARKER, 4)) {
+                groupPerSeed = 1;
+                printf_s("%s runs one work-group per seed by default (--no_group_per_seed to turn off).\n", filter);
+            }
+        }
+    }
     if (groupPerSeed) strcat_s(include_path, sizeof include_path, " -D GROUP_PER_SEED");
     if (extraBuildOpts) { // DIAGNOSTIC
         strcat_s(include_path, sizeof include_path, " ");
@@ -1068,7 +1261,7 @@ build_program:
                                 scoresToFile, filter, begin)) {
             exitCode = EXIT_FAILURE;
         }
-    } else if (!twoPass && !toFile && !fromFile) {
+    } else if (!twoPass && !toFile && !fromFile && !groupPerSeed) {
         // Plain single pass: print straight from the kernel.
         //
         // The range is walked in launches of about --launch_seconds each rather
@@ -1126,7 +1319,14 @@ build_program:
         // `listBuf` holds the packed rank list feeding a pass; `outBuf` and
         // `countBuf` receive a collecting kernel's hits. Both are sized to hold
         // every seed of a batch, so the kernels can never overflow them.
-        const cl_long batchSeeds = prefilterBatch;
+        // A grouped range is fed as a rank list (search_ranks_grouped reads one),
+        // so its batch is the list buffer's length: sized to the range when that
+        // is small, which for -n 1 is one seed rather than 512 MB of buffer.
+        cl_long batchSeeds = prefilterBatch;
+        if (groupPerSeed && !fromFile && !twoPass) {
+            if (!userBatch && batchSeeds > (1 << 16)) batchSeeds = 1 << 16;
+            if (numSeeds > 0 && batchSeeds > numSeeds) batchSeeds = numSeeds;
+        }
         cl_mem listBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_long) * (size_t)batchSeeds, NULL, &err);
         clErrCheck(err, "clCreateBuffer - Creating rank list buffer");
         cl_mem outBuf = NULL;
@@ -1139,7 +1339,7 @@ build_program:
         cl_mem countBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), NULL, &err);
         clErrCheck(err, "clCreateBuffer - Creating count buffer");
         cl_long* hostRanks = NULL; // staging for file <-> device transfers
-        if (toFile || fromFile) {
+        if (toFile || fromFile || groupPerSeed) {
             hostRanks = (cl_long*)malloc(sizeof(cl_long) * (size_t)batchSeeds);
             if (!hostRanks) { fprintf_s(stderr, "Out of memory for a %lld-seed batch; lower --batch.\n", (long long)batchSeeds); exit(EXIT_FAILURE); }
         }
@@ -1245,6 +1445,13 @@ build_program:
                 if (totalIn >= numSeeds) break;
                 thisBatch = numSeeds - totalIn < batchCap ? numSeeds - totalIn : batchCap;
                 batchStart = startRank + totalIn;
+                if (groupPerSeed && !twoPass) {
+                    // The grouped kernel takes a rank list, so spell the range out.
+                    for (cl_long k = 0; k < thisBatch; k++) hostRanks[k] = batchStart + k;
+                    err = clEnqueueWriteBuffer(queue, listBuf, CL_TRUE, 0, sizeof(cl_long) * (size_t)thisBatch, hostRanks, 0, NULL, NULL);
+                    clErrCheck(err, "clEnqueueWriteBuffer - Uploading grouped range");
+                    haveList = 1;
+                }
                 if (twoPass) {
                     err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
                     clErrCheck(err, "clEnqueueWriteBuffer - Resetting survivor count");
@@ -1314,7 +1521,9 @@ build_program:
                         clErrCheck(err, "clFinish - Waiting for ranks kernel");
                     }
                 }
-                if (fromFile) totalIn += thisBatch;
+                // A --from chunk or a grouped range spelled out as a list; a two-pass
+                // list already counted its input when the prefilter ran.
+                if (fromFile || (groupPerSeed && !twoPass)) totalIn += thisBatch;
             } else {
                 // Range, collecting (single pass with --to).
                 err = clEnqueueWriteBuffer(queue, countBuf, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);

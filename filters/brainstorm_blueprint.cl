@@ -14,6 +14,13 @@
 // this filter observes. Locked Common/Uncommon jokers likewise only reroll
 // within their own pool, which is never drawn here. Per seed that is ~14 card-type polls, ~10 rarity
 // polls, 9 pack polls and a rare-identity draw for about one slot in twenty.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt BB_SHOP_ANTE1=4  ante-1 shop slots scanned
+// @opt BB_SHOP_ANTE2=10  ante-2 shop slots scanned
+// @opt BB_PACKS_ANTE1=3  ante-1 packs scanned (the first is the forced Buffoon Pack)
+// @opt BB_PACKS_ANTE2=6  ante-2 packs scanned
+
 #include "lib/immolate.cl"
 
 // ---------------------------------------------------------------------------

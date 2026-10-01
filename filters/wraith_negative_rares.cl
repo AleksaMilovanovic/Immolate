@@ -40,6 +40,17 @@
 //    independent of the identity node (R_Joker_Rare), so reading only the
 //    edition is exact -- nothing this filter skips is read by anything it
 //    does read.
+
+// Build options (pass with --build_opts "-D NAME" or "-D NAME=VALUE"):
+// @opt WNR_FIRST_ANTE=1  first ante checked for Wraith negatives
+// @opt WNR_LAST_ANTE=15  last ante checked for Wraith negatives
+// @opt WNR_WEIGHT_BASE=20  score of a Wraith negative before the taper starts
+// @opt WNR_TAPER_ANTE=10  ante the weight starts tapering at
+// @opt WNR_TAPER_RATE=0.2  fraction of WNR_WEIGHT_BASE the weight loses per ante from the taper on
+// @opt WNR_TRIGGERS=3  Sixth Sense / Seance spectral creations per ante checked for a Wraith
+// @opt WNR_WRAITH_DEPTH=3  Wraith-created jokers per ante checked for Negative
+// @opt WNR_COUNT_ONLY  score the plain count of Wraith negatives instead of the weighted total
+
 #define INSTANCE_NO_DECK
 #include "lib/immolate.cl"
 
